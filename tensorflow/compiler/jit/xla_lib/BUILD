@@ -7,7 +7,7 @@ load(
     "tf_cc_shared_object",
 )
 load(
-    "//tensorflow/core:platform/default:build_config.bzl",
+    "//tensorflow/core/platform:build_config.bzl",
     "tf_additional_all_protos",
     "tf_proto_library",
     "tf_proto_library_cc",
