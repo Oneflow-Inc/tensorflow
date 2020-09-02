@@ -13,7 +13,7 @@ load(
     "tf_proto_library_cc",
     "tf_proto_library_py",
 )
-load("//tensorflow/compiler/xla:xla.bzl", "xla_proto_library")
+load("//tensorflow/compiler/xla:xla.bzl", "xla_py_proto_library")
 load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
 
 cc_library(
