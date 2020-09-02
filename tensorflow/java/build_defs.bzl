@@ -1,5 +1,3 @@
-# -*- Python -*-
-
 # Pin to Java 1.7 to ensure broader compatibility for the Java bindings on
 # Android. Note also that the android_library bazel rule currently enforces
 # java 7
@@ -7,6 +5,7 @@
 
 JAVA_VERSION_OPTS = [
     "-source 7 -target 7",
+    "-XDnoparameters",
 ]
 
 # A more robust set of lint and errorprone checks when building

@@ -14,7 +14,7 @@
 
 import Foundation
 
-/// TensorFlow Lite interpreter errors.
+/// Errors thrown by the TensorFlow Lite `Interpreter`.
 public enum InterpreterError: Error, Equatable, Hashable {
   case invalidTensorIndex(index: Int, maxIndex: Int)
   case invalidTensorDataCount(provided: Int, required: Int)
@@ -29,10 +29,8 @@ public enum InterpreterError: Error, Equatable, Hashable {
   case tensorFlowLiteError(String)
 }
 
-// MARK: - Extensions
-
 extension InterpreterError: LocalizedError {
-  /// Localized description of the interpreter error.
+  /// A localized description of the interpreter error.
   public var errorDescription: String? {
     switch self {
     case .invalidTensorIndex(let index, let maxIndex):
@@ -46,7 +44,7 @@ extension InterpreterError: LocalizedError {
     case .failedToCreateInterpreter:
       return "Failed to create the interpreter."
     case .failedToResizeInputTensor(let index):
-      return "Failed to resize input tesnor at index \(index)."
+      return "Failed to resize input tensor at index \(index)."
     case .failedToCopyDataToInputTensor:
       return "Failed to copy data to input tensor."
     case .failedToAllocateTensors:
@@ -62,6 +60,6 @@ extension InterpreterError: LocalizedError {
 }
 
 extension InterpreterError: CustomStringConvertible {
-  /// Textual representation of the TensorFlow Lite interpreter error.
+  /// A textual representation of the TensorFlow Lite interpreter error.
   public var description: String { return errorDescription ?? "Unknown error." }
 }

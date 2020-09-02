@@ -60,6 +60,11 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_KeyValueSort(
   std::unique_ptr<std::string[]> reordered_values(
       new std::string[sort_dimension_elements]);
   for (int64 index = 0; index < num_iteration_elements; ++index) {
+    // If the sort should be stable, we have to reinitialize indices to iota to
+    // guarantee that we still keep the relative order in case of ties.
+    if (is_stable && index > 0) {
+      std::iota(indices.get(), indices.get() + sort_dimension_elements, 0);
+    }
     // 'index' can be split into two values which index into the 'c' dimension
     // and the 'a' dimension, respectively. 'index' % 'c' is the index into the
     // 'c' dimension, 'index' / 'c' is the index into the 'a' dimension. When
@@ -70,11 +75,11 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_KeyValueSort(
         index % sort_dimension_offset +
         (index - index % sort_dimension_offset) * sort_dimension_elements;
     auto compare_function = [&](int64 a, int64 b) -> bool {
-      int64 memory_index_lhs = (base_offset + a * sort_dimension_offset) *
-                               values_primitive_type_size_in_bytes[0];
-      int64 memory_index_rhs = (base_offset + b * sort_dimension_offset) *
-                               values_primitive_type_size_in_bytes[0];
       for (int32 i = 0; i < values_count; ++i) {
+        int64 memory_index_lhs = (base_offset + a * sort_dimension_offset) *
+                                 values_primitive_type_size_in_bytes[i];
+        int64 memory_index_rhs = (base_offset + b * sort_dimension_offset) *
+                                 values_primitive_type_size_in_bytes[i];
         comparison_values[i * 2] = values[i] + memory_index_lhs;
         comparison_values[i * 2 + 1] = values[i] + memory_index_rhs;
       }

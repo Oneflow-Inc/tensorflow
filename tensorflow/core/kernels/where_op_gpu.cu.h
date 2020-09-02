@@ -21,27 +21,14 @@ limitations under the License.
 #define EIGEN_USE_GPU
 
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
-#if GOOGLE_CUDA
-#include "third_party/cub/device/device_reduce.cuh"
-#include "third_party/cub/device/device_select.cuh"
-#include "third_party/cub/iterator/counting_input_iterator.cuh"
-#include "third_party/cub/iterator/transform_input_iterator.cuh"
-#elif TENSORFLOW_USE_ROCM
-#include "external/rocprim_archive/hipcub/include/hipcub/hipcub.hpp"
-#endif
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor_types.h"
+#include "tensorflow/core/kernels/gpu_prim.h"
 #include "tensorflow/core/kernels/where_op.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/gpu_kernel_helper.h"
-
-#if GOOGLE_CUDA
-namespace gpuprim = ::cub;
-#elif TENSORFLOW_USE_ROCM
-namespace gpuprim = ::hipcub;
-#endif
 
 namespace tensorflow {
 
@@ -52,7 +39,7 @@ namespace functor {
 template <int NDIM, typename TIndex>
 __global__ void PropagateWhereIndicesKernel(
     const TIndex output_rows, const typename Eigen::array<TIndex, NDIM> strides,
-    int64* output) {
+    int64* __restrict__ output) {
   // TODO(ebrevdo): Use a multi-dimensional loop, increasing the
   // dimensions of individual indices manually, instead of relying on
   // a scalar loop variable and using integer division.
@@ -149,7 +136,7 @@ struct NumTrue<GPUDevice, T, TIndex> {
   EIGEN_ALWAYS_INLINE static Status Compute(
       OpKernelContext* ctx, const GPUDevice& d,
       typename TTypes<T>::ConstFlat input,
-      typename TTypes<TIndex>::Scalar num_true) {
+      typename TTypes<TIndex>::UnalignedScalar num_true) {
     const auto& cu_stream = GetGpuStream(ctx);
 
     std::size_t temp_storage_bytes = 0;

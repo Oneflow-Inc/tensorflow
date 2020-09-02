@@ -84,6 +84,8 @@ struct CollImplDetails {
       dependencies;           // collective instances on which this node depends
   string communication_hint;  // user-supplied hint for implementation choice,
                               // e.g. ring or nccl
+  float timeout_seconds;      // If non zero, set a completion timeout for the
+                              // collective op to detect staleness.
 };
 
 // Data common to all members of a collective instance.
@@ -302,10 +304,10 @@ class CollectiveExecutor : public PeerAccessInterface, public core::RefCounted {
   // execution, where safety is defined as: ordered with respect to the
   // collective instances defined in the callee's `wait_for` attribute.
   virtual void WaitForDependencies(const CollectiveParams& col_params) {}
-  // `Launched` unblocks the dependent collective instances by recording that
-  // this callee device has completed the critical portion of the collective
-  // execution.
-  virtual void Launched(const CollectiveParams& col_params) {}
+  // `UnblockDependencies` unblocks the dependent collective instances by
+  // recording that this caller's device has completed the critical portion of
+  // the collective execution.
+  virtual void UnblockDependencies(const CollectiveParams& col_params) {}
 
   // Used to designate an invalid group or instance key.
   static int64 kInvalidId;

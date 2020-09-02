@@ -10,6 +10,9 @@ def tf_additional_cuda_platform_deps():
 def tf_additional_cuda_driver_deps():
     return [":cuda_stub"]
 
+def tf_additional_cupti_deps():
+    return ["//tensorflow/stream_executor/cuda:cupti_stub"]
+
 def tf_additional_cudnn_plugin_deps():
     return []
 
@@ -18,3 +21,6 @@ def if_gpu_is_configured(x):
     if cuda_is_configured() or rocm_is_configured():
         return x
     return []
+
+def if_cuda_or_rocm(x):
+    return if_gpu_is_configured(x)

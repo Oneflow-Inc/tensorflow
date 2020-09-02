@@ -40,9 +40,12 @@ static const char kNotInvertibleScalarMsg[] =
     "The matrix is not invertible: it is a scalar with value zero.";
 
 template <typename Scalar>
-__global__ void SolveForSizeOneOrTwoKernel(const int m, const Scalar* diags,
-                                           const Scalar* rhs, const int num_rhs,
-                                           Scalar* x, bool* not_invertible) {
+__global__ void SolveForSizeOneOrTwoKernel(const int m,
+                                           const Scalar* __restrict__ diags,
+                                           const Scalar* __restrict__ rhs,
+                                           const int num_rhs,
+                                           Scalar* __restrict__ x,
+                                           bool* __restrict__ not_invertible) {
   if (m == 1) {
     if (diags[1] == Scalar(0)) {
       *not_invertible = true;
@@ -153,7 +156,7 @@ class TridiagonalSolveOpGpuLinalg : public LinearAlgebraOp<Scalar> {
                            k);
       return;
     }
-    std::unique_ptr<CudaSparse> cusparse_solver(new CudaSparse(context));
+    std::unique_ptr<GpuSparse> cusparse_solver(new GpuSparse(context));
     OP_REQUIRES_OK(context, cusparse_solver->Initialize());
     if (k == 1) {
       // rhs is copied into x, then gtsv replaces x with solution.
@@ -193,20 +196,13 @@ class TridiagonalSolveOpGpuLinalg : public LinearAlgebraOp<Scalar> {
   }
 
   void SolveWithGtsv(OpKernelContext* context,
-                     std::unique_ptr<CudaSparse>& cusparse_solver,
+                     std::unique_ptr<GpuSparse>& cusparse_solver,
                      const Scalar* superdiag, const Scalar* diag,
                      const Scalar* subdiag, Scalar* rhs, const int num_eqs,
                      const int num_rhs) const {
-#if CUDA_VERSION < 9000
-    auto function = pivoting_ ? &CudaSparse::Gtsv<Scalar>
-                              : &CudaSparse::GtsvNoPivot<Scalar>;
-    OP_REQUIRES_OK(
-        context, (cusparse_solver.get()->*function)(
-                     num_eqs, num_rhs, subdiag, diag, superdiag, rhs, num_eqs));
-#else
     auto buffer_function = pivoting_
-                               ? &CudaSparse::Gtsv2BufferSizeExt<Scalar>
-                               : &CudaSparse::Gtsv2NoPivotBufferSizeExt<Scalar>;
+                               ? &GpuSparse::Gtsv2BufferSizeExt<Scalar>
+                               : &GpuSparse::Gtsv2NoPivotBufferSizeExt<Scalar>;
     size_t buffer_size;
     OP_REQUIRES_OK(context, (cusparse_solver.get()->*buffer_function)(
                                 num_eqs, num_rhs, subdiag, diag, superdiag, rhs,
@@ -217,12 +213,11 @@ class TridiagonalSolveOpGpuLinalg : public LinearAlgebraOp<Scalar> {
                    context->allocate_temp(DT_UINT8, temp_shape, &temp_tensor));
     void* buffer = temp_tensor.flat<std::uint8_t>().data();
 
-    auto solver_function = pivoting_ ? &CudaSparse::Gtsv2<Scalar>
-                                     : &CudaSparse::Gtsv2NoPivot<Scalar>;
+    auto solver_function = pivoting_ ? &GpuSparse::Gtsv2<Scalar>
+                                     : &GpuSparse::Gtsv2NoPivot<Scalar>;
     OP_REQUIRES_OK(context, (cusparse_solver.get()->*solver_function)(
                                 num_eqs, num_rhs, subdiag, diag, superdiag, rhs,
                                 num_eqs, buffer));
-#endif  // CUDA_VERSION < 9000
   }
 
   void SolveForSizeOneOrTwo(OpKernelContext* context, const Scalar* diagonals,
@@ -312,14 +307,10 @@ class TridiagonalSolveOpGpu : public OpKernel {
                        rhs.flat<Scalar>().size());
     Scalar* x = output->flat<Scalar>().data();
 
-    std::unique_ptr<CudaSparse> cusparse_solver(new CudaSparse(context));
+    std::unique_ptr<GpuSparse> cusparse_solver(new GpuSparse(context));
 
     OP_REQUIRES_OK(context, cusparse_solver->Initialize());
-#if CUDA_VERSION < 9000
-    OP_REQUIRES_OK(context, cusparse_solver->GtsvStridedBatch(
-                                matrix_size, subdiag, diag, superdiag, x,
-                                batch_size, matrix_size));
-#else
+
     size_t buffer_size;
     OP_REQUIRES_OK(context, cusparse_solver->Gtsv2StridedBatchBufferSizeExt(
                                 matrix_size, subdiag, diag, superdiag, x,
@@ -332,7 +323,6 @@ class TridiagonalSolveOpGpu : public OpKernel {
     OP_REQUIRES_OK(context, cusparse_solver->Gtsv2StridedBatch(
                                 matrix_size, subdiag, diag, superdiag, x,
                                 batch_size, matrix_size, buffer));
-#endif  // CUDA_VERSION < 9000
   }
 
   void TransposeLhsForGtsvBatched(OpKernelContext* context, const Tensor& lhs,

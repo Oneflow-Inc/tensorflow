@@ -51,7 +51,8 @@ class SnapshotDatasetBenchmark(benchmark_base.DatasetBenchmarkBase):
     dataset = dataset.map(
         lambda x: gen_array_ops.broadcast_to(x, [50, 50, 3]))
     dataset = dataset.repeat(num_elems)
-    dataset = dataset.apply(snapshot.snapshot(tmp_dir, compression=compression))
+    dataset = dataset.apply(
+        snapshot.legacy_snapshot(tmp_dir, compression=compression))
 
     return dataset
 
@@ -71,6 +72,14 @@ class SnapshotDatasetBenchmark(benchmark_base.DatasetBenchmarkBase):
 
     self.run_and_report_benchmark(dataset, num_elems, "write_gzip",
                                   warmup=False, iters=1)
+
+  def benchmarkWriteSnapshotSnappyCompression(self):
+    num_elems = 500000
+    dataset = self._createSimpleDataset(
+        num_elems, compression=snapshot.COMPRESSION_SNAPPY)
+
+    self.run_and_report_benchmark(
+        dataset, num_elems, "write_snappy", warmup=False, iters=1)
 
   def benchmarkWriteSnapshotSimple(self):
     num_elems = 500000
@@ -110,6 +119,15 @@ class SnapshotDatasetBenchmark(benchmark_base.DatasetBenchmarkBase):
 
     self._consumeDataset(dataset, num_elems)
     self.run_and_report_benchmark(dataset, num_elems, "read_gzip")
+
+  def benchmarkReadSnapshotSnappyCompression(self):
+    num_elems = 100000
+    tmp_dir = self._makeSnapshotDirectory()
+    dataset = self._createSimpleDataset(
+        num_elems, tmp_dir, compression=snapshot.COMPRESSION_SNAPPY)
+
+    self._consumeDataset(dataset, num_elems)
+    self.run_and_report_benchmark(dataset, num_elems, "read_snappy")
 
 
 if __name__ == "__main__":

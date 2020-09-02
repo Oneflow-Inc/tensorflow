@@ -22,6 +22,13 @@ limitations under the License.
 
 namespace xla {
 
+// Slices input starting from the base_indices and within the window_sizes,
+// using the supplied strides. This is the equivalent of the Python slicing op
+// [base_indices : base_indices+window_sizes : stride].
+XlaOp DynamicStridedSlice(XlaOp input, absl::Span<const XlaOp> base_indices,
+                          absl::Span<const int64> window_sizes,
+                          absl::Span<const int64> strides);
+
 // Updates a slice of 'x', i.e.,
 // x[start[0], ..., start[n]] = update
 XlaOp UpdateSlice(XlaOp x, XlaOp update, absl::Span<const int64> start);
@@ -56,6 +63,13 @@ XlaOp DynamicUpdateSliceInMinorDims(XlaOp x, XlaOp update,
 // [X0,X1,...Y,Xi+1,...,X[N] where y >= 1 and `out` will have the same sizes as
 // `index`.
 XlaOp TorchGather(XlaOp input, XlaOp index, int64 dim, bool sparse = true);
+
+// idx = index[i][j][k]
+// output[idx][j][k] = combiner(input[idx][j][k], src[i][j][k])  # if dim == 0
+// output[i][idx][k] = combiner(input[i][idx][k], src[i][j][k])  # if dim == 1
+// output[i][j][idx] = combiner(input[i][j][idx], src[i][j][k])  # if dim == 2
+XlaOp TorchScatterDense(XlaOp input, XlaOp index, XlaOp src, int64 dim,
+                        const std::function<XlaOp(XlaOp, XlaOp)>& combiner);
 
 // Returns a new tensor which indexes the input tensor along dimension dim using
 // the entries in index.

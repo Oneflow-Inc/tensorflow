@@ -12,9 +12,12 @@
 #    a watch state.
 # ":debug_node_key" - Defines a struct used for tracking tensors.
 
+load("//tensorflow:tensorflow.bzl", "tf_grpc_cc_dependency")
 load(
     "//tensorflow:tensorflow.bzl",
     "check_deps",
+    "if_windows",
+    "tf_cc_binary",
     "tf_cc_test",
     "tf_copts",
     "tf_cuda_library",
@@ -22,7 +25,7 @@ load(
 
 # For platform specific build config
 load(
-    "//tensorflow/core/platform:default/build_config.bzl",
+    "//tensorflow/core/platform:build_config.bzl",
     "tf_additional_all_protos",
     "tf_kernel_tests_linkstatic",
     "tf_proto_library",
@@ -36,7 +39,7 @@ package(
 # Check that tensorflow/core:tensorflow does not depend on grpc.
 check_deps(
     name = "core_tensorflow_check_deps",
-    disallowed_deps = ["@grpc//:grpc++"],
+    disallowed_deps = ["@com_github_grpc_grpc//:grpc++"],
     deps = ["//tensorflow/core:tensorflow"],
 )
 
@@ -71,6 +74,9 @@ cc_library(
         ":debugger_state_impl",
         "//tensorflow/core:core_cpu_internal",
         "//tensorflow/core:debug_ops_op_lib",
+        # Depends on grpc and hence should stay out of
+        # //third_party/tensorflow/core.
+        "//tensorflow/core/kernels:debug_ops",
     ],
     alwayslink = 1,
 )
@@ -101,7 +107,6 @@ tf_cuda_library(
         "//tensorflow/core:graph",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
-        "//tensorflow/core:proto_text",
         "//tensorflow/core:protos_all_cc",
     ],
     alwayslink = 1,
@@ -112,21 +117,21 @@ tf_cuda_library(
     srcs = ["debug_io_utils.cc"],
     hdrs = ["debug_io_utils.h"],
     copts = tf_copts(),
+    linkopts = if_windows(["-DEFAULTLIB:ws2_32.lib"]),
     linkstatic = 1,
     deps = [
         ":debug_callback_registry",
         ":debug_node_key",
         ":debug_service_proto_cc",
         ":debugger_event_metadata_proto_cc",
-        "//tensorflow:grpc++",
         "//tensorflow/core:core_cpu_internal",
         "//tensorflow/core:framework",
         "//tensorflow/core:graph",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
-        "//tensorflow/core:proto_text",
         "//tensorflow/core:protos_all_cc",
         "@com_google_absl//absl/strings",
+        tf_grpc_cc_dependency(),
     ],
     alwayslink = 1,
 )
@@ -142,11 +147,11 @@ tf_cuda_library(
         ":debug_io_utils",
         ":debug_service_proto_cc",
         ":debugger_event_metadata_proto_cc",
-        "//tensorflow:grpc++",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:protos_all_cc",
+        tf_grpc_cc_dependency(),
     ],
     alwayslink = 1,
 )
@@ -273,6 +278,17 @@ cc_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
+    ],
+)
+
+tf_cc_binary(
+    name = "bfc_dump_reader",
+    srcs = ["bfc_dump_reader.cc"],
+    deps = [
+        "//tensorflow/core:framework_internal",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core/platform:regexp",
     ],
 )
 

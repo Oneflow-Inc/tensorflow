@@ -60,21 +60,22 @@ class StringNGramsOp : public tensorflow::OpKernel {
     OP_REQUIRES_OK(context, context->input("data_splits", &splits));
     const auto& splits_vec = splits->flat<SPLITS_TYPE>();
 
-    // If there is no data or size, return an empty RT.
-    if (data->flat<tstring>().size() == 0 || splits_vec.size() == 0) {
-      tensorflow::Tensor* empty;
-      OP_REQUIRES_OK(context,
-                     context->allocate_output(0, data->shape(), &empty));
-      OP_REQUIRES_OK(context,
-                     context->allocate_output(1, splits->shape(), &empty));
-      return;
-    }
-
     int num_batch_items = splits_vec.size() - 1;
     tensorflow::Tensor* ngrams_splits;
     OP_REQUIRES_OK(
         context, context->allocate_output(1, splits->shape(), &ngrams_splits));
     auto ngrams_splits_data = ngrams_splits->flat<SPLITS_TYPE>().data();
+
+    // If there is no data or size, return an empty RT.
+    if (data->flat<tstring>().size() == 0 || splits_vec.size() == 0) {
+      tensorflow::Tensor* empty;
+      OP_REQUIRES_OK(context,
+                     context->allocate_output(0, data->shape(), &empty));
+      for (int i = 0; i <= num_batch_items; ++i) {
+        ngrams_splits_data[i] = 0;
+      }
+      return;
+    }
 
     ngrams_splits_data[0] = 0;
     for (int i = 1; i <= num_batch_items; ++i) {
@@ -128,7 +129,7 @@ class StringNGramsOp : public tensorflow::OpKernel {
     }
   }
 
-  void CreateNgrams(const string* data, string* output, int num_ngrams,
+  void CreateNgrams(const tstring* data, tstring* output, int num_ngrams,
                     int ngram_width) const {
     for (int ngram_index = 0; ngram_index < num_ngrams; ++ngram_index) {
       int pad_width = get_pad_width(ngram_width);
@@ -154,20 +155,20 @@ class StringNGramsOp : public tensorflow::OpKernel {
       ngram_size += num_separators * separator_.length();
 
       // Build the ngram.
-      string* ngram = &output[ngram_index];
+      tstring* ngram = &output[ngram_index];
       ngram->reserve(ngram_size);
       for (int n = 0; n < left_padding; ++n) {
-        *ngram += left_pad_;
-        *ngram += separator_;
+        ngram->append(left_pad_);
+        ngram->append(separator_);
       }
       for (int n = 0; n < num_tokens - 1; ++n) {
-        *ngram += data[data_start_index + n];
-        *ngram += separator_;
+        ngram->append(data[data_start_index + n]);
+        ngram->append(separator_);
       }
-      *ngram += data[data_start_index + num_tokens - 1];
+      ngram->append(data[data_start_index + num_tokens - 1]);
       for (int n = 0; n < right_padding; ++n) {
-        *ngram += separator_;
-        *ngram += right_pad_;
+        ngram->append(separator_);
+        ngram->append(right_pad_);
       }
 
       // In debug mode only: validate that we've reserved enough space for the

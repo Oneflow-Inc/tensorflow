@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/cl/kernels/util.h"
 #include "tensorflow/lite/delegates/gpu/cl/kernels/work_group_picking.h"
+#include "tensorflow/lite/delegates/gpu/cl/precision.h"
 
 namespace tflite {
 namespace gpu {
@@ -28,23 +29,30 @@ namespace cl {
 namespace {
 
 std::string GenerateConvolutionTransposedCode(
-    const TensorDescriptor& src_descriptor,
-    const TensorDescriptor& dst_descriptor, CalculationsPrecision precision,
-    int src_depth, int dst_channels, const int2& kernel_size,
+    const OperationDef& op_def, int src_depth, int dst_channels,
+    const int2& kernel_size, const CLDevice& device,
     const std::vector<ElementwiseOperation*>& linked_operations) {
-  TensorCodeGenerator src_tensor("src_data", "src_size", src_descriptor);
-  TensorCodeGenerator dst_tensor("dst_data", "dst_size", dst_descriptor);
+  TensorCodeGenerator src_tensor(
+      "src_data",
+      WHSBPoint{"src_size.x", "src_size.y", "src_size.z", "src_size.w"},
+      op_def.src_tensors[0]);
+  TensorCodeGenerator dst_tensor(
+      "dst_data",
+      WHSBPoint{"dst_size.x", "dst_size.y", "dst_size.z", "dst_size.w"},
+      op_def.dst_tensors[0]);
 
-  std::string c = GetCommonDefines(precision);
+  const std::string batch_id = op_def.IsBatchSupported() ? "B" : "";
+  std::string c = GetCommonDefines(op_def.precision);
   const std::string channel_x = dst_channels == 1 ? "" : ".x";
-  const std::vector<std::string> channel = {channel_x, ".y", ".z", ".w"};
+  const std::vector<std::string> postfix = {channel_x, ".y", ".z", ".w"};
+  const std::vector<std::string> channel = {".x", ".y", ".z", ".w"};
 
   const std::string type_postfix =
       dst_channels == 1 ? "" : std::to_string(dst_channels);
 
   std::string accum_type;
 
-  switch (precision) {
+  switch (op_def.precision) {
     case CalculationsPrecision::F32:
     case CalculationsPrecision::F32_F16:
       accum_type = "float" + type_postfix;
@@ -63,41 +71,44 @@ std::string GenerateConvolutionTransposedCode(
   c += "    int4 dst_size,             \n";
   c += "    FLT4 bias_value            \n";
   c += ") {\n";
-  c += "  int X = get_global_id(0);\n";
+  if (op_def.IsBatchSupported()) {
+    c += "  int linear_id = get_global_id(0);\n";
+    c += "  int X = linear_id / dst_size.w;\n";
+    c += "  int B = linear_id % dst_size.w;\n";
+  } else {
+    c += "  int X = get_global_id(0);\n";
+  }
   c += "  int Y = get_global_id(1);\n";
   c += "  if (X >= src_size.x || Y >= src_size.y) return;\n";
   c += "  " + accum_type + " r[" + std::to_string(kernel_size.y) + "][" +
        std::to_string(kernel_size.x) + "];\n";
   c += "  {\n";
-  c += "  FLT4 src = " + src_tensor.Read3D("X", "Y", "0") + ";\n";
+  c += "  FLT4 src = " + src_tensor.ReadWHSB("X", "Y", "0", batch_id) + ";\n";
   int index = 0;
   for (int y = 0; y < kernel_size.y; ++y) {
     for (int x = 0; x < kernel_size.x; ++x) {
       std::string r_s =
           "  r[" + std::to_string(y) + "][" + std::to_string(x) + "]";
       for (int d = 0; d < dst_channels; ++d) {
-        c += r_s + channel[d] + " = TO_ACCUM_FLT(dot(src, filters[" +
-             std::to_string(index) + "]));\n";
+        c += r_s + postfix[d] + " = dot(src, filters[" + std::to_string(index) +
+             "]);\n";
         index++;
       }
     }
   }
   c += "  }\n";
   for (int i = 1; i < src_depth; ++i) {
-    if (precision != CalculationsPrecision::F32_F16) {
-      c += "  if (X < src_size.x + " + std::to_string(i + 1) + ") {\n";
-    } else {
-      c += "  {\n";
-    }
-    c += "  FLT4 src = " + src_tensor.Read3D("X", "Y", std::to_string(i)) +
-         ";\n";
+    c += "  if (X > " + std::to_string(-i) +
+         ") {  // always true, to reduce registers usage\n";
+    c += "  FLT4 src = " +
+         src_tensor.ReadWHSB("X", "Y", std::to_string(i), batch_id) + ";\n";
     for (int y = 0; y < kernel_size.y; ++y) {
       for (int x = 0; x < kernel_size.x; ++x) {
         std::string r_s =
             "  r[" + std::to_string(y) + "][" + std::to_string(x) + "]";
         for (int d = 0; d < dst_channels; ++d) {
-          c += r_s + channel[d] + " += TO_ACCUM_FLT(dot(src, filters[" +
-               std::to_string(index) + "]));\n";
+          c += r_s + postfix[d] + " += dot(src, filters[" +
+               std::to_string(index) + "]);\n";
           index++;
         }
       }
@@ -105,26 +116,26 @@ std::string GenerateConvolutionTransposedCode(
     c += "  }\n";
   }
   c += "  X *= " + std::to_string(kernel_size.x) + ";\n";
-  c += "  Y *= " + std::to_string(kernel_size.x) + ";\n";
+  c += "  Y *= " + std::to_string(kernel_size.y) + ";\n";
   for (int y = 0; y < kernel_size.y; ++y) {
     for (int x = 0; x < kernel_size.x; ++x) {
-      if (precision != CalculationsPrecision::F32_F16) {
-        c += "  if (X + " + std::to_string(x) + " < dst_size.x && ";
-        c += "Y + " + std::to_string(y) + " < dst_size.y) {\n";
-      } else {
-        c += "  {\n";
-      }
+      const std::string x_coord = "X + " + std::to_string(x);
+      const std::string y_coord = "Y + " + std::to_string(y);
+      c += "  if (" + x_coord + " < dst_size.x && " + y_coord +
+           " < dst_size.y) {\n";
       c += "    FLT4 result = bias_value;\n";
       for (int d = 0; d < dst_channels; ++d) {
         c += "    result" + channel[d] + " += r[" + std::to_string(y) + "][" +
-             std::to_string(x) + "]" + channel[d] + ";\n";
+             std::to_string(x) + "]" + postfix[d] + ";\n";
       }
+      const std::string x_3dcoord = op_def.IsBatchSupported()
+                                        ? "(" + x_coord + ") * dst_size.w + B"
+                                        : x_coord;
+      const LinkingContext context{"result", x_3dcoord, y_coord, "0"};
+      c += PostProcess(linked_operations, context);
       c += "    " +
-           dst_tensor.GetAddress("address", "X + " + std::to_string(x),
-                                 "Y + " + std::to_string(y), "0") +
+           dst_tensor.WriteWHSB("result", x_coord, y_coord, "0", batch_id) +
            "\n";
-      c += PostProcess(linked_operations, "result", "0", "address");
-      c += "    " + dst_tensor.Write3D("result", "address") + "\n";
       c += "  }\n";
     }
   }
@@ -173,12 +184,11 @@ ConvolutionTransposedThin& ConvolutionTransposedThin::operator=(
   return *this;
 }
 
-Status ConvolutionTransposedThin::Compile(
+absl::Status ConvolutionTransposedThin::Compile(
     const CreationContext& creation_context) {
   const auto code = GenerateConvolutionTransposedCode(
-      definition_.src_tensors[0], definition_.dst_tensors[0],
-      definition_.precision, IntegralDivideRoundUp(src_channels_, 4),
-      dst_channels_, kernel_size_, linked_operations_);
+      definition_, DivideRoundUp(src_channels_, 4), dst_channels_, kernel_size_,
+      *creation_context.device, linked_operations_);
 
   std::vector<CompilerOptions> options;
   if (definition_.precision == CalculationsPrecision::F16 &&
@@ -191,55 +201,55 @@ Status ConvolutionTransposedThin::Compile(
       *creation_context.device, &kernel_);
 }
 
-Status ConvolutionTransposedThin::BindArguments() {
+absl::Status ConvolutionTransposedThin::BindArguments() {
   kernel_.ResetBindingCounter();
   RETURN_IF_ERROR(kernel_.SetMemoryAuto(src_[0]->GetMemoryPtr()));
   RETURN_IF_ERROR(kernel_.SetMemoryAuto(weights_buf_.GetMemoryPtr()));
   RETURN_IF_ERROR(BindArgs(&kernel_, linked_operations_));
-  RETURN_IF_ERROR(kernel_.SetMemoryAuto(dst_[0]->GetMemoryPtr()));
-  RETURN_IF_ERROR(kernel_.SetBytesAuto(src_[0]->GetSizeWithDepth()));
-  RETURN_IF_ERROR(kernel_.SetBytesAuto(dst_[0]->GetSizeWithDepth()));
+  RETURN_IF_ERROR(kernel_.SetMemoryAuto(dst_[0]->GetMemoryPtrForWriting()));
+  RETURN_IF_ERROR(kernel_.SetBytesAuto(src_[0]->GetWHSB()));
+  RETURN_IF_ERROR(kernel_.SetBytesAuto(dst_[0]->GetWHSB()));
   RETURN_IF_ERROR(kernel_.SetBytesAuto(bias_value_));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 int3 ConvolutionTransposedThin::GetGridSize() const {
-  const int grid_x = src_[0]->Width();
+  const int grid_x = src_[0]->Width() * dst_[0]->Batch();
   const int grid_y = src_[0]->Height();
   const int grid_z = 1;
   return int3(grid_x, grid_y, grid_z);
 }
 
-Status ConvolutionTransposedThin::Tune(const TuningParameters& params) {
+absl::Status ConvolutionTransposedThin::Tune(const TuningParameters& params) {
   RETURN_IF_ERROR(BindArguments());
   return GetBestWorkGroup(params, kernel_, GetGridSize(), &work_group_size_);
 }
 
-Status ConvolutionTransposedThin::AddToQueue(CLCommandQueue* queue) {
+absl::Status ConvolutionTransposedThin::AddToQueue(CLCommandQueue* queue) {
   RETURN_IF_ERROR(BindArguments());
   return queue->DispatchImplicit(kernel_, GetGridSize(), work_group_size_);
 }
 
 bool IsConvolutionTransposedThinSupported(
     const CLDevice& device, const ConvolutionTransposedAttributes& attr) {
-  return device.IsAdreno() && attr.weights.shape.o <= 4 &&
-         attr.weights.shape.w == attr.stride.w &&
+  return attr.weights.shape.o <= 4 && attr.weights.shape.w == attr.stride.w &&
          attr.weights.shape.h == attr.stride.h &&
-         attr.padding.prepended.w == 0 && attr.padding.prepended.h == 0;
+         attr.padding.prepended.w == 0 && attr.padding.prepended.h == 0 &&
+         attr.padding.appended.w == 0 && attr.padding.appended.h == 0;
 }
 
-Status CreateConvolutionTransposedThin(
+absl::Status CreateConvolutionTransposedThin(
     const CreationContext& creation_context, const OperationDef& definition,
     const ConvolutionTransposedAttributes& attr,
     ConvolutionTransposedThin* result) {
   if (!IsConvolutionTransposedThinSupported(*creation_context.device, attr)) {
-    return InvalidArgumentError(
+    return absl::InvalidArgumentError(
         "ConvolutionTransposedThin doesn't support this attributes");
   }
   *result = ConvolutionTransposedThin(definition, attr);
   RETURN_IF_ERROR(
       result->UploadWeights(attr.weights, creation_context.context));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace cl

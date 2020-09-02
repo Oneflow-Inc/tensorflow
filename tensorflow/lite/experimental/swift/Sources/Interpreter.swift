@@ -17,41 +17,55 @@ import TensorFlowLiteC
 
 /// A TensorFlow Lite interpreter that performs inference from a given model.
 public final class Interpreter {
-  /// `TFL_Interpreter` C pointer type represented as an `UnsafePointer<TFL_Interpreter>`.
+  /// The configuration options for the `Interpreter`.
+  public let options: Options?
+
+  /// An `Array` of `Delegate`s for the `Interpreter` to use to perform graph operations.
+  public let delegates: [Delegate]?
+
+  /// The total number of input `Tensor`s associated with the model.
+  public var inputTensorCount: Int {
+    return Int(TfLiteInterpreterGetInputTensorCount(cInterpreter))
+  }
+
+  /// The total number of output `Tensor`s associated with the model.
+  public var outputTensorCount: Int {
+    return Int(TfLiteInterpreterGetOutputTensorCount(cInterpreter))
+  }
+
+  /// The `TfLiteInterpreter` C pointer type represented as an `UnsafePointer<TfLiteInterpreter>`.
   private typealias CInterpreter = OpaquePointer
 
-  /// Total number of input tensors associated with the model.
-  public var inputTensorCount: Int {
-    return Int(TFL_InterpreterGetInputTensorCount(cInterpreter))
-  }
-
-  /// Total number of output tensors associated with the model.
-  public var outputTensorCount: Int {
-    return Int(TFL_InterpreterGetOutputTensorCount(cInterpreter))
-  }
-
-  /// Underlying `TFL_Interpreter` C pointer.
+  /// The underlying `TfLiteInterpreter` C pointer.
   private var cInterpreter: CInterpreter?
 
-  /// Creates a new model interpreter instance.
+  /// The underlying `TfLiteDelegate` C pointer for XNNPACK delegate.
+  private var cXNNPackDelegate: Delegate.CDelegate?
+
+  /// Creates a new instance with the given values.
   ///
   /// - Parameters:
-  ///   - modelPath: Local file path to a TensorFlow Lite model.
-  ///   - options: Custom configurations for the interpreter. Default is `nil` indicating that the
-  ///       interpreter will determine the configuration options.
+  ///   - modelPath: The local file path to a TensorFlow Lite model.
+  ///   - options: Configurations for the `Interpreter`. The default is `nil` indicating that the
+  ///       `Interpreter` will determine the configuration options.
+  ///   - delegate: `Array` of `Delegate`s for the `Interpreter` to use to peform graph operations.
+  ///       The default is `nil`.
   /// - Throws: An error if the model could not be loaded or the interpreter could not be created.
-  public init(modelPath: String, options: InterpreterOptions? = nil) throws {
+  public init(modelPath: String, options: Options? = nil, delegates: [Delegate]? = nil) throws {
     guard let model = Model(filePath: modelPath) else { throw InterpreterError.failedToLoadModel }
+    guard let cInterpreterOptions = TfLiteInterpreterOptionsCreate() else {
+      throw InterpreterError.failedToCreateInterpreter
+    }
+    defer { TfLiteInterpreterOptionsDelete(cInterpreterOptions) }
 
-    let cInterpreterOptions: OpaquePointer? = try options.map { options in
-      guard let cOptions = TFL_NewInterpreterOptions() else {
-        throw InterpreterError.failedToCreateInterpreter
+    self.options = options
+    self.delegates = delegates
+    options.map {
+      if let threadCount = $0.threadCount, threadCount > 0 {
+        TfLiteInterpreterOptionsSetNumThreads(cInterpreterOptions, Int32(threadCount))
       }
-      if let threadCount = options.threadCount, threadCount > 0 {
-        TFL_InterpreterOptionsSetNumThreads(cOptions, Int32(threadCount))
-      }
-      TFL_InterpreterOptionsSetErrorReporter(
-        cOptions,
+      TfLiteInterpreterOptionsSetErrorReporter(
+        cInterpreterOptions,
         { (_, format, args) -> Void in
           // Workaround for optionality differences for x86_64 (non-optional) and arm64 (optional).
           let optionalArgs: CVaListPointer? = args
@@ -65,57 +79,64 @@ public final class Interpreter {
         },
         nil
       )
-      return cOptions
     }
-    defer { TFL_DeleteInterpreterOptions(cInterpreterOptions) }
+    delegates?.forEach { TfLiteInterpreterOptionsAddDelegate(cInterpreterOptions, $0.cDelegate) }
 
-    guard let cInterpreter = TFL_NewInterpreter(model.cModel, cInterpreterOptions) else {
+    // Configure the XNNPack delegate after the other delegates explicitly added by the user.
+    options.map {
+      if $0.isXNNPackEnabled {
+        configureXNNPack(options: $0, cInterpreterOptions: cInterpreterOptions)
+      }
+    }
+
+    guard let cInterpreter = TfLiteInterpreterCreate(model.cModel, cInterpreterOptions) else {
       throw InterpreterError.failedToCreateInterpreter
     }
     self.cInterpreter = cInterpreter
   }
 
   deinit {
-    TFL_DeleteInterpreter(cInterpreter)
+    TfLiteInterpreterDelete(cInterpreter)
+    TfLiteXNNPackDelegateDelete(cXNNPackDelegate)
   }
 
   /// Invokes the interpreter to perform inference from the loaded graph.
   ///
-  /// - Throws: An error if the model was not ready because tensors were not allocated.
+  /// - Throws: An error if the model was not ready because the tensors were not allocated.
   public func invoke() throws {
-    guard TFL_InterpreterInvoke(cInterpreter) == kTfLiteOk else {
+    guard TfLiteInterpreterInvoke(cInterpreter) == kTfLiteOk else {
       throw InterpreterError.allocateTensorsRequired
     }
   }
 
-  /// Returns the input tensor at the given index.
+  /// Returns the input `Tensor` at the given index.
   ///
   /// - Parameters:
-  ///   - index: The index for the input tensor.
+  ///   - index: The index for the input `Tensor`.
   /// - Throws: An error if the index is invalid or the tensors have not been allocated.
-  /// - Returns: The input tensor at the given index.
+  /// - Returns: The input `Tensor` at the given index.
   public func input(at index: Int) throws -> Tensor {
     let maxIndex = inputTensorCount - 1
     guard case 0...maxIndex = index else {
       throw InterpreterError.invalidTensorIndex(index: index, maxIndex: maxIndex)
     }
-    guard let cTensor = TFL_InterpreterGetInputTensor(cInterpreter, Int32(index)),
-      let bytes = TFL_TensorData(cTensor),
-      let nameCString = TFL_TensorName(cTensor)
+    guard let cTensor = TfLiteInterpreterGetInputTensor(cInterpreter, Int32(index)),
+      let bytes = TfLiteTensorData(cTensor),
+      let nameCString = TfLiteTensorName(cTensor)
     else {
       throw InterpreterError.allocateTensorsRequired
     }
-    guard let dataType = TensorDataType(type: TFL_TensorType(cTensor)) else {
+    guard let dataType = Tensor.DataType(type: TfLiteTensorType(cTensor)) else {
       throw InterpreterError.invalidTensorDataType
     }
 
     let name = String(cString: nameCString)
-    let rank = TFL_TensorNumDims(cTensor)
-    let dimensions = (0..<rank).map { Int(TFL_TensorDim(cTensor, $0)) }
-    let shape = TensorShape(dimensions)
-    let byteCount = TFL_TensorByteSize(cTensor)
+    let rank = TfLiteTensorNumDims(cTensor)
+    let dimensions = (0..<rank).map { Int(TfLiteTensorDim(cTensor, $0)) }
+    let shape = Tensor.Shape(dimensions)
+    let byteCount = TfLiteTensorByteSize(cTensor)
     let data = Data(bytes: bytes, count: byteCount)
-    let cQuantizationParams = TFL_TensorQuantizationParams(cTensor)
+    let cQuantizationParams = TfLiteTensorQuantizationParams(cTensor)
     let scale = cQuantizationParams.scale
     let zeroPoint = Int(cQuantizationParams.zero_point)
     var quantizationParameters: QuantizationParameters? = nil
@@ -132,36 +153,36 @@ public final class Interpreter {
     return tensor
   }
 
-  /// Returns the output tensor at the given index.
+  /// Returns the output `Tensor` at the given index.
   ///
   /// - Parameters:
-  ///   - index: The index for the output tensor.
+  ///   - index: The index for the output `Tensor`.
   /// - Throws: An error if the index is invalid, tensors haven't been allocated, or interpreter
-  ///     hasn't been invoked for models that dynamically compute output tensors based on the values
-  ///     of its input tensors.
-  /// - Returns: The output tensor at the given index.
+  ///     has not been invoked for models that dynamically compute output tensors based on the
+  ///     values of its input tensors.
+  /// - Returns: The output `Tensor` at the given index.
   public func output(at index: Int) throws -> Tensor {
     let maxIndex = outputTensorCount - 1
     guard case 0...maxIndex = index else {
       throw InterpreterError.invalidTensorIndex(index: index, maxIndex: maxIndex)
     }
-    guard let cTensor = TFL_InterpreterGetOutputTensor(cInterpreter, Int32(index)),
-      let bytes = TFL_TensorData(cTensor),
-      let nameCString = TFL_TensorName(cTensor)
+    guard let cTensor = TfLiteInterpreterGetOutputTensor(cInterpreter, Int32(index)),
+      let bytes = TfLiteTensorData(cTensor),
+      let nameCString = TfLiteTensorName(cTensor)
     else {
       throw InterpreterError.invokeInterpreterRequired
     }
-    guard let dataType = TensorDataType(type: TFL_TensorType(cTensor)) else {
+    guard let dataType = Tensor.DataType(type: TfLiteTensorType(cTensor)) else {
       throw InterpreterError.invalidTensorDataType
     }
 
     let name = String(cString: nameCString)
-    let rank = TFL_TensorNumDims(cTensor)
-    let dimensions = (0..<rank).map { Int(TFL_TensorDim(cTensor, $0)) }
-    let shape = TensorShape(dimensions)
-    let byteCount = TFL_TensorByteSize(cTensor)
+    let rank = TfLiteTensorNumDims(cTensor)
+    let dimensions = (0..<rank).map { Int(TfLiteTensorDim(cTensor, $0)) }
+    let shape = Tensor.Shape(dimensions)
+    let byteCount = TfLiteTensorByteSize(cTensor)
     let data = Data(bytes: bytes, count: byteCount)
-    let cQuantizationParams = TFL_TensorQuantizationParams(cTensor)
+    let cQuantizationParams = TfLiteTensorQuantizationParams(cTensor)
     let scale = cQuantizationParams.scale
     let zeroPoint = Int(cQuantizationParams.zero_point)
     var quantizationParameters: QuantizationParameters? = nil
@@ -178,78 +199,128 @@ public final class Interpreter {
     return tensor
   }
 
-  /// Resizes the input tensor at the given index to the specified tensor shape.
+  /// Resizes the input `Tensor` at the given index to the specified `Tensor.Shape`.
   ///
   /// - Note: After resizing an input tensor, the client **must** explicitly call
   ///     `allocateTensors()` before attempting to access the resized tensor data or invoking the
   ///     interpreter to perform inference.
   /// - Parameters:
-  ///   - index: The index for the input tensor.
-  ///   - shape: The shape that the input tensor should be resized to.
+  ///   - index: The index for the input `Tensor`.
+  ///   - shape: The shape to resize the input `Tensor` to.
   /// - Throws: An error if the input tensor at the given index could not be resized.
-  public func resizeInput(at index: Int, to shape: TensorShape) throws {
+  public func resizeInput(at index: Int, to shape: Tensor.Shape) throws {
     let maxIndex = inputTensorCount - 1
     guard case 0...maxIndex = index else {
       throw InterpreterError.invalidTensorIndex(index: index, maxIndex: maxIndex)
     }
-    guard TFL_InterpreterResizeInputTensor(
-      cInterpreter,
-      Int32(index),
-      shape.int32Dimensions,
-      Int32(shape.rank)
-    ) == kTfLiteOk
+    guard
+      TfLiteInterpreterResizeInputTensor(
+        cInterpreter,
+        Int32(index),
+        shape.int32Dimensions,
+        Int32(shape.rank)
+      ) == kTfLiteOk
     else {
       throw InterpreterError.failedToResizeInputTensor(index: index)
     }
   }
 
-  /// Copies the given data to the input tensor at the given index.
+  /// Copies the given data to the input `Tensor` at the given index.
   ///
   /// - Parameters:
-  ///   - data: The data to be copied to the input tensor's data buffer.
-  ///   - index: The index for the input tensor.
+  ///   - data: The data to be copied to the input `Tensor`'s data buffer.
+  ///   - index: The index for the input `Tensor`.
   /// - Throws: An error if the `data.count` does not match the input tensor's `data.count` or if
   ///     the given index is invalid.
-  /// - Returns: The input tensor with the copied data.
+  /// - Returns: The input `Tensor` with the copied data.
   @discardableResult
   public func copy(_ data: Data, toInputAt index: Int) throws -> Tensor {
     let maxIndex = inputTensorCount - 1
     guard case 0...maxIndex = index else {
       throw InterpreterError.invalidTensorIndex(index: index, maxIndex: maxIndex)
     }
-    guard let cTensor = TFL_InterpreterGetInputTensor(cInterpreter, Int32(index)) else {
+    guard let cTensor = TfLiteInterpreterGetInputTensor(cInterpreter, Int32(index)) else {
       throw InterpreterError.allocateTensorsRequired
     }
 
-    let byteCount = TFL_TensorByteSize(cTensor)
+    let byteCount = TfLiteTensorByteSize(cTensor)
     guard data.count == byteCount else {
       throw InterpreterError.invalidTensorDataCount(provided: data.count, required: byteCount)
     }
 
     #if swift(>=5.0)
-    let status = data.withUnsafeBytes {
-      TFL_TensorCopyFromBuffer(cTensor, $0.baseAddress, data.count)
-    }
+      let status = data.withUnsafeBytes {
+        TfLiteTensorCopyFromBuffer(cTensor, $0.baseAddress, data.count)
+      }
     #else
-    let status = data.withUnsafeBytes { TFL_TensorCopyFromBuffer(cTensor, $0, data.count) }
+      let status = data.withUnsafeBytes { TfLiteTensorCopyFromBuffer(cTensor, $0, data.count) }
     #endif  // swift(>=5.0)
     guard status == kTfLiteOk else { throw InterpreterError.failedToCopyDataToInputTensor }
     return try input(at: index)
   }
 
-  /// Allocates memory for all input tensors based on their `TensorShape`s.
+  /// Allocates memory for all input `Tensor`s based on their `Tensor.Shape`s.
   ///
   /// - Note: This is a relatively expensive operation and should only be called after creating the
-  ///     interpreter and/or resizing any input tensors.
+  ///     interpreter and resizing any input tensors.
   /// - Throws: An error if memory could not be allocated for the input tensors.
   public func allocateTensors() throws {
-    guard TFL_InterpreterAllocateTensors(cInterpreter) == kTfLiteOk else {
+    guard TfLiteInterpreterAllocateTensors(cInterpreter) == kTfLiteOk else {
       throw InterpreterError.failedToAllocateTensors
     }
   }
+
+  // MARK: - Private
+
+  private func configureXNNPack(options: Options, cInterpreterOptions: OpaquePointer) {
+    var cXNNPackOptions = TfLiteXNNPackDelegateOptionsDefault()
+    if let threadCount = options.threadCount, threadCount > 0 {
+      cXNNPackOptions.num_threads = Int32(threadCount)
+    }
+
+    cXNNPackDelegate = TfLiteXNNPackDelegateCreate(&cXNNPackOptions)
+    TfLiteInterpreterOptionsAddDelegate(cInterpreterOptions, cXNNPackDelegate)
+  }
 }
 
-// MARK: - Extensions
+extension Interpreter {
+  /// Options for configuring the `Interpreter`.
+  public struct Options: Equatable, Hashable {
+    /// The maximum number of CPU threads that the interpreter should run on. The default is `nil`
+    /// indicating that the `Interpreter` will decide the number of threads to use.
+    public var threadCount: Int? = nil
+
+    /// Indicates whether an optimized set of floating point CPU kernels, provided by XNNPACK, is
+    /// enabled.
+    ///
+    /// - Experiment:
+    /// Enabling this flag will enable use of a new, highly optimized set of CPU kernels provided
+    /// via the XNNPACK delegate. Currently, this is restricted to a subset of floating point
+    /// operations. Eventually, we plan to enable this by default, as it can provide significant
+    /// performance benefits for many classes of floating point models. See
+    /// https://github.com/tensorflow/tensorflow/blob/master/tensorflow/lite/delegates/xnnpack/README.md
+    /// for more details.
+    ///
+    /// - Important:
+    /// Things to keep in mind when enabling this flag:
+    ///
+    ///     * Startup time and resize time may increase.
+    ///     * Baseline memory consumption may increase.
+    ///     * Compatibility with other delegates (e.g., GPU) has not been fully validated.
+    ///     * Quantized models will not see any benefit.
+    ///
+    /// - Warning: This is an experimental interface that is subject to change.
+    public var isXNNPackEnabled: Bool = false
+
+    /// Creates a new instance with the default values.
+    public init() {}
+  }
+}
+
+/// A type alias for `Interpreter.Options` to support backwards compatibility with the deprecated
+/// `InterpreterOptions` struct.
+@available(*, deprecated, renamed: "Interpreter.Options")
+public typealias InterpreterOptions = Interpreter.Options
 
 extension String {
   /// Returns a new `String` initialized by using the given format C array as a template into which

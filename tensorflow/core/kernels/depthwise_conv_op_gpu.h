@@ -83,8 +83,10 @@ enum DepthwiseConv2dDirection { DIRECTION_FORWARD, DIRECTION_BACKWARD };
 template <typename T, int kKnownFilterWidth, int kKnownFilterHeight,
           int kKnownDepthMultiplier>
 __global__ void __launch_bounds__(1024, 2)
-    DepthwiseConv2dGPUKernelNHWC(const DepthwiseArgs args, const T* input,
-                                 const T* filter, T* output, int num_outputs) {
+    DepthwiseConv2dGPUKernelNHWC(const DepthwiseArgs args,
+                                 const T* __restrict__ input,
+                                 const T* __restrict__ filter,
+                                 T* __restrict__ output, int num_outputs) {
   typedef typename detail::PseudoHalfType<T>::Type S;
   const int in_height = args.in_rows;
   const int in_width = args.in_cols;
@@ -187,7 +189,8 @@ template <typename T, DepthwiseConv2dDirection kDirection,
           int kKnownFilterWidth, int kKnownFilterHeight, int kBlockDepth,
           bool kKnownEvenHeight>
 __global__ __launch_bounds__(1024, 2) void DepthwiseConv2dGPUKernelNHWCSmall(
-    const DepthwiseArgs args, const T* input, const T* filter, T* output) {
+    const DepthwiseArgs args, const T* __restrict__ input,
+    const T* __restrict__ filter, T* __restrict__ output) {
   typedef typename detail::PseudoHalfType<T>::Type S;
   assert(CanLaunchDepthwiseConv2dGPUSmall(args));
   // Holds block plus halo and filter data for blockDim.x depths.
@@ -327,8 +330,10 @@ __global__ __launch_bounds__(1024, 2) void DepthwiseConv2dGPUKernelNHWCSmall(
 template <typename T, int kKnownFilterWidth, int kKnownFilterHeight,
           int kKnownDepthMultiplier>
 __global__ void __launch_bounds__(1024, 2)
-    DepthwiseConv2dGPUKernelNCHW(const DepthwiseArgs args, const T* input,
-                                 const T* filter, T* output, int num_outputs) {
+    DepthwiseConv2dGPUKernelNCHW(const DepthwiseArgs args,
+                                 const T* __restrict__ input,
+                                 const T* __restrict__ filter,
+                                 T* __restrict__ output, int num_outputs) {
   typedef typename detail::PseudoHalfType<T>::Type S;
   const int in_height = args.in_rows;
   const int in_width = args.in_cols;
@@ -475,7 +480,8 @@ template <typename T, DepthwiseConv2dDirection kDirection,
           int kKnownFilterWidth, int kKnownFilterHeight, int kBlockDepth,
           bool kKnownEvenHeight>
 __global__ __launch_bounds__(1024, 2) void DepthwiseConv2dGPUKernelNCHWSmall(
-    const DepthwiseArgs args, const T* input, const T* filter, T* output) {
+    const DepthwiseArgs args, const T* __restrict__ input,
+    const T* __restrict__ filter, T* __restrict__ output) {
   typedef typename detail::PseudoHalfType<T>::Type S;
   assert(CanLaunchDepthwiseConv2dGPUSmall(args));
   // Holds block plus halo and filter data for blockDim.z depths.
@@ -798,10 +804,10 @@ void LaunchDepthwiseConvOp<GpuDevice, T>::operator()(OpKernelContext* ctx,
 template <typename T, int kKnownFilterWidth, int kKnownFilterHeight,
           int kKnownDepthMultiplier>
 __global__ void __launch_bounds__(640, 2)
-    DepthwiseConv2dBackpropInputGPUKernelNHWC(const DepthwiseArgs args,
-                                              const T* out_backprop,
-                                              const T* filter, T* in_backprop,
-                                              int num_in_backprop) {
+    DepthwiseConv2dBackpropInputGPUKernelNHWC(
+        const DepthwiseArgs args, const T* __restrict__ out_backprop,
+        const T* __restrict__ filter, T* __restrict__ in_backprop,
+        int num_in_backprop) {
   const int in_height = args.in_rows;
   const int in_width = args.in_cols;
   const int in_depth = args.in_depth;
@@ -868,10 +874,10 @@ __global__ void __launch_bounds__(640, 2)
 template <typename T, int kKnownFilterWidth, int kKnownFilterHeight,
           int kKnownDepthMultiplier>
 __global__ void __launch_bounds__(640, 2)
-    DepthwiseConv2dBackpropInputGPUKernelNCHW(const DepthwiseArgs args,
-                                              const T* out_backprop,
-                                              const T* filter, T* in_backprop,
-                                              int num_in_backprop) {
+    DepthwiseConv2dBackpropInputGPUKernelNCHW(
+        const DepthwiseArgs args, const T* __restrict__ out_backprop,
+        const T* __restrict__ filter, T* __restrict__ in_backprop,
+        int num_in_backprop) {
   const int in_height = args.in_rows;
   const int in_width = args.in_cols;
   const int in_depth = args.in_depth;
@@ -981,7 +987,9 @@ Status LaunchDepthwiseConv2dBackpropInputGPU(OpKernelContext* ctx,
                                              const T* filter, T* in_backprop,
                                              TensorFormat data_format) {
   if (args.depth_multiplier == 1) {
-    if (CanLaunchDepthwiseConv2dGPUSmall(args)) {
+    // This kernel doesn't currently work in all cases so it is disabled.
+    // TODO(b/150988950): Fix and reenable this kernel.
+    if (/* CanLaunchDepthwiseConv2dGPUSmall(args) */ false) {
       return LaunchDepthwiseConv2dGPUSmall<
           T, DIRECTION_BACKWARD, kKnownFilterWidth, kKnownFilterHeight>(
           ctx, args, out_backprop, filter, in_backprop, data_format);
@@ -1019,11 +1027,10 @@ void LaunchDepthwiseConvBackpropInputOp<GpuDevice, T>::operator()(
 template <typename T, int kKnownFilterWidth, int kKnownFilterHeight,
           int kKnownDepthMultiplier>
 __global__ void __launch_bounds__(640, 2)
-    DepthwiseConv2dBackpropFilterGPUKernelNHWC(const DepthwiseArgs args,
-                                               const T* out_backprop,
-                                               const T* input,
-                                               T* filter_backprop,
-                                               int num_out_backprop) {
+    DepthwiseConv2dBackpropFilterGPUKernelNHWC(
+        const DepthwiseArgs args, const T* __restrict__ out_backprop,
+        const T* __restrict__ input, T* __restrict__ filter_backprop,
+        int num_out_backprop) {
   const int in_height = args.in_rows;
   const int in_width = args.in_cols;
   const int in_depth = args.in_depth;
@@ -1153,7 +1160,8 @@ template <typename T, int kKnownFilterWidth, int kKnownFilterHeight,
           int kBlockDepth, int kAccumPixels>
 __global__
 __launch_bounds__(1024, 2) void DepthwiseConv2dBackpropFilterGPUKernelNHWCSmall(
-    const DepthwiseArgs args, const T* output, const T* input, T* filter) {
+    const DepthwiseArgs args, const T* __restrict__ output,
+    const T* __restrict__ input, T* __restrict__ filter) {
   typedef typename detail::PseudoHalfType<T>::Type S;
   assert(CanLaunchDepthwiseConv2dBackpropFilterGPUSmall(args, blockDim.z));
   // Holds block plus halo and filter data for blockDim.x depths.
@@ -1304,11 +1312,10 @@ __launch_bounds__(1024, 2) void DepthwiseConv2dBackpropFilterGPUKernelNHWCSmall(
 template <typename T, int kKnownFilterWidth, int kKnownFilterHeight,
           int kKnownDepthMultiplier>
 __global__ void __launch_bounds__(640, 2)
-    DepthwiseConv2dBackpropFilterGPUKernelNCHW(const DepthwiseArgs args,
-                                               const T* out_backprop,
-                                               const T* input,
-                                               T* filter_backprop,
-                                               int num_out_backprop) {
+    DepthwiseConv2dBackpropFilterGPUKernelNCHW(
+        const DepthwiseArgs args, const T* __restrict__ out_backprop,
+        const T* __restrict__ input, T* __restrict__ filter_backprop,
+        int num_out_backprop) {
   const int in_height = args.in_rows;
   const int in_width = args.in_cols;
   const int in_depth = args.in_depth;
@@ -1426,7 +1433,8 @@ template <typename T, int kKnownFilterWidth, int kKnownFilterHeight,
           int kBlockDepth, int kAccumPixels>
 __global__
 __launch_bounds__(1024, 2) void DepthwiseConv2dBackpropFilterGPUKernelNCHWSmall(
-    const DepthwiseArgs args, const T* output, const T* input, T* filter) {
+    const DepthwiseArgs args, const T* __restrict__ output,
+    const T* __restrict__ input, T* __restrict__ filter) {
   typedef typename detail::PseudoHalfType<T>::Type S;
   assert(CanLaunchDepthwiseConv2dBackpropFilterGPUSmall(args, blockDim.x));
   // Holds block plus halo and filter data for blockDim.z depths.
@@ -1755,7 +1763,7 @@ void LaunchDepthwiseConvBackpropFilterOp<GpuDevice, T>::operator()(
   int num_filter_backprop =
       args.filter_rows * args.filter_cols * args.out_depth;
   se::DeviceMemoryBase filter_bp_ptr(filter_backprop, num_filter_backprop);
-  stream->ThenMemset32(&filter_bp_ptr, 0, num_filter_backprop * sizeof(T));
+  stream->ThenMemZero(&filter_bp_ptr, num_filter_backprop * sizeof(T));
 
   if (args.filter_rows == 3 && args.filter_cols == 3) {
     OP_REQUIRES_OK(

@@ -16,21 +16,22 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_DELEGATES_GPU_CL_GPU_API_DELEGATE_H_
 #define TENSORFLOW_LITE_DELEGATES_GPU_CL_GPU_API_DELEGATE_H_
 
-#include <stdint.h>
-
 #include <EGL/egl.h>
 #include <GLES3/gl31.h>
-#include "tensorflow/lite/c/c_api_internal.h"
+#include <stdint.h>
+
+#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/delegates/gpu/delegate.h"
 
 #ifdef SWIG
 #define TFL_CAPI_EXPORT
 #else
 #if defined(_WIN32)
-#ifdef TF_COMPILE_LIBRARY
+#ifdef TFL_COMPILE_LIBRARY
 #define TFL_CAPI_EXPORT __declspec(dllexport)
 #else
 #define TFL_CAPI_EXPORT __declspec(dllimport)
-#endif  // TF_COMPILE_LIBRARY
+#endif  // TFL_COMPILE_LIBRARY
 #else
 #define TFL_CAPI_EXPORT __attribute__((visibility("default")))
 #endif  // _WIN32
@@ -40,13 +41,8 @@ limitations under the License.
 extern "C" {
 #endif  // __cplusplus
 
-enum TfLiteGpuInferencePriority {
-  TFLITE_GPU_INFERENCE_PRIORITY_MAX_PRECISION = 0,
-  TFLITE_GPU_INFERENCE_PRIORITY_MIN_LATENCY = 1,
-};
-
 // Shader compilation options.
-struct TFL_CAPI_EXPORT TfLiteGpuCompileOptions_New {
+typedef struct {
   // When set to zero, computations are carried out in 32-bit floating point.
   // Otherwise, the GPU may quantify tensors, downcast values, process in FP16
   // (recommended).
@@ -54,9 +50,9 @@ struct TFL_CAPI_EXPORT TfLiteGpuCompileOptions_New {
 
   // Priority is defined in TfLiteGpuInferencePriority.
   int32_t inference_priority;
-};
+} TfLiteGpuCompileOptions_New;
 
-struct TFL_CAPI_EXPORT TfLiteGpuDelegateOptions_New {
+typedef struct {
   TfLiteGpuCompileOptions_New compile_options;
 
   // [Optional]
@@ -72,7 +68,7 @@ struct TFL_CAPI_EXPORT TfLiteGpuDelegateOptions_New {
   // incompatible when GPU driver is updated.
   const uint8_t* serialized_binary_cache_data;
   size_t serialized_binary_cache_size;
-};
+} TfLiteGpuDelegateOptions_New;
 
 // Creates a new delegate instance that need to be destroyed with
 // TfLiteGpuDelegateDelete_New when delegate is no longer used by TFLite.
@@ -88,10 +84,10 @@ TFL_CAPI_EXPORT TfLiteDelegate* TfLiteGpuDelegateCreate_New(
 // Destroys a delegate created with `TfLiteGpuDelegateCreate_New` call.
 TFL_CAPI_EXPORT void TfLiteGpuDelegateDelete_New(TfLiteDelegate* delegate);
 
-enum TfLiteGpuDataLayout {
+typedef enum {
   TFLITE_GPU_DATA_LAYOUT_BHWC = 0,
   TFLITE_GPU_DATA_LAYOUT_DHWC4 = 1,
-};
+} TfLiteGpuDataLayout;
 
 // Binds GL shader storage object to an input or an output tensor in the
 // initialized delegate. Bound buffer should have sufficient storage to

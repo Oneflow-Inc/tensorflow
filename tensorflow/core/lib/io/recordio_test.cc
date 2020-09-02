@@ -64,7 +64,7 @@ class StringDest : public WritableFile {
   }
 #if defined(PLATFORM_GOOGLE)
   Status Append(const absl::Cord& data) override {
-    contents_->append(data.ToString());
+    contents_->append(std::string(data));
     return Status::OK();
   }
 #endif
@@ -149,7 +149,7 @@ class RecordioTest : public ::testing::Test {
     if (!reading_) {
       reading_ = true;
     }
-    string record;
+    tstring record;
     Status s = reader_->ReadRecord(&readpos_, &record);
     if (s.ok()) {
       return record;
@@ -183,7 +183,7 @@ class RecordioTest : public ::testing::Test {
     Write(BigString("x", 10000));
     reading_ = true;
     uint64 offset = WrittenBytes() + offset_past_end;
-    string record;
+    tstring record;
     Status s = reader_->ReadRecord(&offset, &record);
     ASSERT_TRUE(errors::IsOutOfRange(s)) << s;
   }
@@ -261,7 +261,7 @@ void TestNonSequentialReads(const RecordWriterOptions& writer_options,
   StringSource file(&contents);
   RecordReader reader(&file, reader_options);
 
-  string record;
+  tstring record;
   // First read sequentially to fill in the offsets table.
   uint64 offsets[10] = {0};
   uint64 offset = 0;
@@ -315,7 +315,7 @@ void TestReadError(const RecordWriterOptions& writer_options,
   RecordReader reader(&file, reader_options);
 
   uint64 offset = 0;
-  string read;
+  tstring read;
   file.force_error();
   Status status = reader.ReadRecord(&offset, &read);
   ASSERT_TRUE(errors::IsDataLoss(status));

@@ -22,6 +22,7 @@ import threading
 
 from tensorflow.python.distribute import device_util
 from tensorflow.python.distribute import distribute_lib
+from tensorflow.python.distribute import distribute_utils
 from tensorflow.python.distribute import distribution_strategy_context
 from tensorflow.python.distribute import mirrored_strategy
 from tensorflow.python.distribute import values
@@ -91,8 +92,7 @@ class MirroredFunctionExtended(distribute_lib.StrategyExtendedV1):
     device_tuple = tuple(device_util.resolve(d) for d in devices)
     assert len(set(device_tuple)) == len(device_tuple), (
         "No duplicates allowed in `devices` argument: %s" % (devices,))
-    self._device_map = values.ReplicaDeviceMap(device_tuple)
-
+    self._devices = device_tuple
     self._retrace_functions_for_each_device = False
 
   def _call_for_each_replica(self, fn, args, kwargs):
@@ -116,8 +116,7 @@ class MirroredFunctionExtended(distribute_lib.StrategyExtendedV1):
 
     try:
       with MirroredFunctionReplicaContext(self._container_strategy()):
-        for index, device in enumerate(
-            self._device_map.logical_to_actual_devices(0)):
+        for index, device in enumerate(self._devices):
           _replica_index.current = index
           with ops.device(device):
             if context.executing_eagerly():
@@ -125,16 +124,18 @@ class MirroredFunctionExtended(distribute_lib.StrategyExtendedV1):
               # use a collective op. This is a particular concern with eager
               # execution.
               with context.execution_mode(context.ASYNC):
-                return_values.append(fn(*values.select_replica(index, args),
-                                        **values.select_replica(index, kwargs)))
+                return_values.append(
+                    fn(*distribute_utils.select_replica(index, args),
+                       **distribute_utils.select_replica(index, kwargs)))
             else:
-              return_values.append(fn(*values.select_replica(index, args),
-                                      **values.select_replica(index, kwargs)))
+              return_values.append(
+                  fn(*distribute_utils.select_replica(index, args),
+                     **distribute_utils.select_replica(index, kwargs)))
     finally:
       _replica_index.graph_outside_run = None
       _replica_index.current = None
 
-    return values.regroup(self._device_map, return_values)
+    return distribute_utils.regroup(return_values)
 
   def _local_results(self, val):
     if isinstance(val, values.DistributedValues):

@@ -310,7 +310,7 @@ class BufferAllocation {
   LogicalBuffer::Color color_;
 
   // Whether this allocation holds an entry computation parameter. Entry
-  // computation parameters are special be cause they have lifetimes which may
+  // computation parameters are special because they have lifetimes which may
   // outlast the computation.
   bool is_entry_computation_parameter_ = false;
 
@@ -566,10 +566,10 @@ class BufferAssigner {
   static Colorer DefaultColorer() {
     return [](HloAliasAnalysis* alias_analysis, const HloOrdering&) {
       for (HloValue* value : alias_analysis->dataflow_analysis().values()) {
-        HloInstruction* defining_instruction = value->defining_instruction();
-        if (defining_instruction->shape().has_layout()) {
+        const HloPosition& defining_position = value->defining_position();
+        if (defining_position.shape().has_layout()) {
           value->set_color(BufferValue::Color(
-              defining_instruction->shape().layout().memory_space()));
+              defining_position.shape().layout().memory_space()));
         } else {
           value->set_color(BufferValue::Color(0));
         }
@@ -673,8 +673,7 @@ class BufferAssigner {
   // Split a set of buffers into several sets, each of which contains buffers
   // colored with the same color.
   absl::flat_hash_map<LogicalBuffer::Color,
-                      absl::flat_hash_set<const HloValue*>,
-                      LogicalBuffer::Color::Hasher>
+                      absl::flat_hash_set<const HloValue*>>
   SplitBuffersByColor(const absl::flat_hash_set<const HloValue*>& buffers);
 
   // If true, allocate buffers for constant instructions.

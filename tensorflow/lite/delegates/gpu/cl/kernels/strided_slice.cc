@@ -25,64 +25,78 @@ namespace gpu {
 namespace cl {
 namespace {
 
-std::string GetStridedSliceCode(
-    const TensorDescriptor& src_descriptor,
-    const TensorDescriptor& dst_descriptor, CalculationsPrecision precision,
-    bool alignedx4,
-    const std::vector<ElementwiseOperation*>& linked_operations) {
-  TensorCodeGenerator src_tensor("src_data", "src_size", src_descriptor);
-  TensorCodeGenerator dst_tensor("dst_data", "dst_size", dst_descriptor);
+std::string GetStridedSliceCode(const OperationDef& op_def, bool alignedx4,
+                                Arguments* args) {
+  args->AddObjectRef(
+      "src_tensor", AccessType::READ,
+      absl::make_unique<TensorDescriptor>(op_def.src_tensors[0]));
+  args->AddObjectRef(
+      "dst_tensor", AccessType::WRITE,
+      absl::make_unique<TensorDescriptor>(op_def.dst_tensors[0]));
+  args->AddInt("offset_x");
+  args->AddInt("offset_y");
+  args->AddInt("offset_z");
+  args->AddInt("offset_b");
+  args->AddInt("stride_x");
+  args->AddInt("stride_y");
+  args->AddInt("stride_z");
+  args->AddInt("stride_b");
 
-  std::string c = GetCommonDefines(precision);
+  const std::string batch_id =
+      op_def.dst_tensors[0].HasAxis(Axis::BATCH) ? "B" : "0";
+  std::string c = GetCommonDefines(op_def.precision);
   c += "__kernel void main_function(\n";
-  c += src_tensor.GetDeclaration(AccessType::READ);
-  c += GetArgsDeclaration(linked_operations);
-  c += dst_tensor.GetDeclaration(AccessType::WRITE) + ",\n";
-  c += "    int4 offset,            \n";
-  c += "    int4 stride,            \n";
-  c += "    int4 src_size,             \n";
-  c += "    int4 dst_size              \n";
-  c += ") {\n";
-  c += "  int X = get_global_id(0);\n";
+  c += "$0) {\n";
+  if (op_def.dst_tensors[0].HasAxis(Axis::BATCH)) {
+    c += "  int linear_id = get_global_id(0);\n";
+    c += "  int X = linear_id / args.dst_tensor.Batch();\n";
+    c += "  int B = linear_id % args.dst_tensor.Batch();\n";
+    c += "  args.dst_tensor.SetBatchRef(B);\n";
+  } else {
+    c += "  int X = get_global_id(0);\n";
+  }
   c += "  int Y = get_global_id(1);\n";
   c += "  int Z = get_global_id(2);\n";
-  c += "  if (X >= dst_size.x || Y >= dst_size.y) { \n";
+  c += "  if (X >= args.dst_tensor.Width() || Y >= args.dst_tensor.Height() || "
+       "Z >= args.dst_tensor.Slices()) { \n";
   c += "    return; \n";
   c += "  } \n";
-  c += "  int s_x = X * stride.x + offset.x;\n";
-  c += "  int s_y = Y * stride.y + offset.y;\n";
+  c += "  int s_x = X * args.stride_x + args.offset_x;\n";
+  c += "  int s_y = Y * args.stride_y + args.offset_y;\n";
+  if (op_def.src_tensors[0].HasAxis(Axis::BATCH)) {
+    c += "  int s_b = " + batch_id + " * args.stride_b + args.offset_b;\n";
+    c += "  args.src_tensor.SetBatchRef(s_b);\n";
+  }
   if (alignedx4) {
-    c += "  int s_z = Z + offset.z;\n";
-    c += "  FLT4 result = " + src_tensor.Read3D("s_x", "s_y", "s_z") + ";\n";
+    c += "  int s_z = Z + args.offset_z;\n";
+    c += "  FLT4 result = args.src_tensor.Read(s_x, s_y, s_z);\n";
   } else {
     c += "  FLT4 result;\n";
     const std::string postfixes[] = {"x", "y", "z", "w"};
     for (int i = 0; i < 4; ++i) {
       c += "  {\n";
       const std::string channel = "(Z * 4 + " + std::to_string(i) + ")";
-      c += "    int s_ch = " + channel + " * stride.z + offset.z;\n";
-      c += "    int s_z = s_ch >> 2;\n";
+      c += "    int s_ch = " + channel + " * args.stride_z + args.offset_z;\n";
+      c += "    int s_z = min(s_ch >> 2, args.src_tensor.Slices() - 1);\n";
       c += "    int s_z_rem = s_ch & 3;\n";
-      c += "    FLT4 t = " + src_tensor.Read3D("s_x", "s_y", "s_z") + ";\n";
+      c += "    FLT4 t = args.src_tensor.Read(s_x, s_y, s_z);\n";
       c += "    FLT t_ar[4] = {t.x, t.y, t.z, t.w};\n";
       c += "    result." + postfixes[i] + " = t_ar[s_z_rem];\n";
       c += "  }\n";
     }
   }
-  c += "  " + dst_tensor.GetAddress("dst_adr", "X", "Y", "Z");
-  c += PostProcess(linked_operations, "result", "Z", "dst_adr");
-  c += "  " + dst_tensor.Write3D("result", "dst_adr");
+  c += "  args.dst_tensor.Write(result, X, Y, Z);\n";
   c += "}\n";
   return c;
 }
 
-bool Is4Alighed(const SliceAttributes& attr) {
+bool Is4Aligned(const SliceAttributes& attr) {
   return attr.strides.c == 1 && attr.starts.c % 4 == 0;
 }
 
-int3 GetOffset(const SliceAttributes& attr, int src_width, int src_height,
-               int src_channels) {
-  int3 offset;
+int4 GetOffset(const SliceAttributes& attr, int src_width, int src_height,
+               int src_channels, int src_batch) {
+  int4 offset;
   if (attr.strides.w > 0) {
     offset.x = attr.starts.w;
   } else {
@@ -110,8 +124,17 @@ int3 GetOffset(const SliceAttributes& attr, int src_width, int src_height,
       offset.z = src_channels + attr.ends.c;
     }
   }
-  if (Is4Alighed(attr)) {
+  if (Is4Aligned(attr)) {
     offset.z /= 4;
+  }
+  if (attr.strides.b > 0) {
+    offset.w = attr.starts.b;
+  } else {
+    if (attr.ends.b > 0) {
+      offset.w = attr.ends.b;
+    } else {
+      offset.w = src_batch + attr.ends.b;
+    }
   }
   return offset;
 }
@@ -138,43 +161,50 @@ StridedSlice& StridedSlice::operator=(StridedSlice&& operation) {
   return *this;
 }
 
-Status StridedSlice::Compile(const CreationContext& creation_context) {
-  const auto code = GetStridedSliceCode(
-      definition_.src_tensors[0], definition_.dst_tensors[0],
-      definition_.precision, Is4Alighed(attributes_), linked_operations_);
+absl::Status StridedSlice::Compile(const CreationContext& creation_context) {
+  std::string code =
+      GetStridedSliceCode(definition_, Is4Aligned(attributes_), &args_);
+  std::string element_wise_code;
+  RETURN_IF_ERROR(
+      MergeOperations(linked_operations_, &args_, &element_wise_code));
+  RETURN_IF_ERROR(args_.TransformToCLCode(creation_context.device->GetInfo(),
+                                          {{"dst_tensor", element_wise_code}},
+                                          &code));
   return creation_context.cache->GetOrCreateCLKernel(
       code, "main_function", *creation_context.context,
       *creation_context.device, &kernel_);
 }
 
-Status StridedSlice::BindArguments() {
-  kernel_.ResetBindingCounter();
-  RETURN_IF_ERROR(kernel_.SetMemoryAuto(src_[0]->GetMemoryPtr()));
-  RETURN_IF_ERROR(BindArgs(&kernel_, linked_operations_));
-  RETURN_IF_ERROR(kernel_.SetMemoryAuto(dst_[0]->GetMemoryPtr()));
-  int3 offset = GetOffset(attributes_, src_[0]->Width(), src_[0]->Height(),
-                          src_[0]->Channels());
-  RETURN_IF_ERROR(kernel_.SetBytesAuto(int4(offset.x, offset.y, offset.z, 1)));
-  RETURN_IF_ERROR(kernel_.SetBytesAuto(int4(
-      attributes_.strides.w, attributes_.strides.h, attributes_.strides.c, 1)));
-  RETURN_IF_ERROR(kernel_.SetBytesAuto(src_[0]->GetSizeWithDepth()));
-  RETURN_IF_ERROR(kernel_.SetBytesAuto(dst_[0]->GetSizeWithDepth()));
-  return OkStatus();
+absl::Status StridedSlice::BindArguments() {
+  RETURN_IF_ERROR(args_.SetObjectRef("src_tensor", src_[0]));
+  RETURN_IF_ERROR(args_.SetObjectRef("dst_tensor", dst_[0]));
+  int4 offset = GetOffset(attributes_, src_[0]->Width(), src_[0]->Height(),
+                          src_[0]->Channels(), src_[0]->Batch());
+  RETURN_IF_ERROR(args_.SetInt("offset_x", offset.x));
+  RETURN_IF_ERROR(args_.SetInt("offset_y", offset.y));
+  RETURN_IF_ERROR(args_.SetInt("offset_z", offset.z));
+  RETURN_IF_ERROR(args_.SetInt("offset_b", offset.w));
+  RETURN_IF_ERROR(args_.SetInt("stride_x", attributes_.strides.w));
+  RETURN_IF_ERROR(args_.SetInt("stride_y", attributes_.strides.h));
+  RETURN_IF_ERROR(args_.SetInt("stride_z", attributes_.strides.c));
+  RETURN_IF_ERROR(args_.SetInt("stride_b", attributes_.strides.b));
+  RETURN_IF_ERROR(SetArguments(linked_operations_, &args_));
+  return args_.Bind(kernel_.kernel());
 }
 
 int3 StridedSlice::GetGridSize() const {
-  const int grid_x = dst_[0]->Width();
+  const int grid_x = dst_[0]->Width() * dst_[0]->Batch();
   const int grid_y = dst_[0]->Height();
-  const int grid_z = dst_[0]->Depth();
+  const int grid_z = dst_[0]->Slices();
   return int3(grid_x, grid_y, grid_z);
 }
 
-Status StridedSlice::Tune(const TuningParameters& params) {
+absl::Status StridedSlice::Tune(const TuningParameters& params) {
   RETURN_IF_ERROR(BindArguments());
   return GetBestWorkGroup(params, kernel_, GetGridSize(), &work_group_size_);
 }
 
-Status StridedSlice::AddToQueue(CLCommandQueue* queue) {
+absl::Status StridedSlice::AddToQueue(CLCommandQueue* queue) {
   RETURN_IF_ERROR(BindArguments());
   return queue->DispatchImplicit(kernel_, GetGridSize(), work_group_size_);
 }

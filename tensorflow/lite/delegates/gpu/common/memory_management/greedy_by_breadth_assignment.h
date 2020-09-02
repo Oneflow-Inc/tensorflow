@@ -19,7 +19,7 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
-#include "tensorflow/lite/delegates/gpu/common/memory_management.h"
+#include "tensorflow/lite/delegates/gpu/common/memory_management/types.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 
 namespace tflite {
@@ -44,7 +44,7 @@ namespace gpu {
 // tensor’s size, assign current tensor to the smallest of them;
 // - If there are suitable objects only with size less than current tensor’s
 // size, assign current tensor to the largest of them and increase its size.
-Status GreedyByBreadthAssignment(
+absl::Status GreedyByBreadthAssignment(
     const std::vector<TensorUsageRecord<size_t>>& usage_records,
     ObjectsAssignment<size_t>* assignment);
 

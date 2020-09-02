@@ -21,30 +21,26 @@ limitations under the License.
 #include "tensorflow/lite/delegates/gpu/cl/kernels/tuning_parameters.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
+#include "tensorflow/lite/delegates/gpu/common/workgroup_selection.h"
 
 namespace tflite {
 namespace gpu {
 namespace cl {
 
-// PRECISE assume that WorkGroupSize * k = GridSize;
-// NO_ALIGNMENT no restrictions;
-// We need PRECISE when we don't have check in kernel for boundaries
-// If we have the check, we can use PRECISE or NO_ALIGNMENT as well.
-enum class WorkGroupSizeAlignment { PRECISE, NO_ALIGNMENT };
-
 // writes best_work_group if successful
 // Here and later you can find XY128, this is because 128 is SIMD width of A6xx
 // And XY128 means that work_group_size.x * work_group_size.y % 128 = 0
 // We need it to correctly work with constants uploading on A6xx
-Status GetBestWorkGroupXY128(const TuningParameters& params,
-                             const CLKernel& kernel, const int3& grid,
-                             WorkGroupSizeAlignment z_alignment,
-                             int3* best_work_group);
-
-Status GetBestWorkGroupXY128Linear(const TuningParameters& params,
+absl::Status GetBestWorkGroupXY128(const TuningParameters& params,
                                    const CLKernel& kernel, const int3& grid,
                                    WorkGroupSizeAlignment z_alignment,
                                    int3* best_work_group);
+
+absl::Status GetBestWorkGroupXY128Linear(const TuningParameters& params,
+                                         const CLKernel& kernel,
+                                         const int3& grid,
+                                         WorkGroupSizeAlignment z_alignment,
+                                         int3* best_work_group);
 
 int3 GetWorkGroupXY128ConvLinear(const int3& grid);
 
@@ -53,12 +49,13 @@ int3 GetWorkGroupXY128Conv(const int3& grid);
 
 bool XY128RequiresMoreWorkGroupsThenXY128Linear(int width, int height);
 
-Status GetBestWorkGroup(const TuningParameters& params, const CLKernel& kernel,
-                        const int3& grid, int3* best_work_group);
+absl::Status GetBestWorkGroup(const TuningParameters& params,
+                              const CLKernel& kernel, const int3& grid,
+                              int3* best_work_group);
 
-Status GetBestWorkGroupConv(const TuningParameters& params,
-                            const CLKernel& kernel, const int3& grid,
-                            int3* best_work_group);
+absl::Status GetBestWorkGroupConv(const TuningParameters& params,
+                                  const CLKernel& kernel, const int3& grid,
+                                  int3* best_work_group);
 
 }  // namespace cl
 }  // namespace gpu

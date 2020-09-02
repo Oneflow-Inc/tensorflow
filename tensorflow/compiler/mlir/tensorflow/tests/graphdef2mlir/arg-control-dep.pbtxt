@@ -1,4 +1,4 @@
-# RUN: tf-mlir-translate -graphdef-to-mlir %s -o - | FileCheck %s
+# RUN: tf-mlir-translate -graphdef-to-mlir -tf-enable-shape-inference-on-import=false %s -o - | FileCheck %s
 
 node {
   name: "Constant"
@@ -41,8 +41,7 @@ library {
     }
     # Drop the control dependency on arg for the node "test"
     # CHECK-LABEL: func @foo
-    # CHECK: tf_executor.island {
-    # CHECK-NEXT:   "tf.Const"()
+    # CHECK: tf_executor.island wraps "tf.Const"()
     node_def {
       name: "test"
       op: "Const"

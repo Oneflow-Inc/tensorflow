@@ -15,10 +15,15 @@ limitations under the License.
 
 #include "tensorflow/core/distributed_runtime/eager/remote_execute_node.h"
 
+#include <vector>
+
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+
 namespace tensorflow {
 namespace eager {
 
-Status RemoteExecuteNode::Run() {
+void RemoteExecuteNode::RunAsync(StatusCallback done) {
   EnqueueResponse* response = new EnqueueResponse;
 
   const gtl::InlinedVector<TensorHandle*, 4>& inputs = inputs_;
@@ -44,10 +49,17 @@ Status RemoteExecuteNode::Run() {
   }
   VLOG(3) << "Issuing: " << rpc_description;
 
-  return eager_client_->StreamingEnqueueAsync(
+  for (auto handle : inputs_) {
+    handle->Ref();
+  }
+  for (auto handle : retvals) {
+    handle->Ref();
+  }
+
+  eager_client_->StreamingEnqueueAsync(
       request_.get(), response,
-      [inputs, retvals, response, device,
-       rpc_description](const Status& status) {
+      [inputs, retvals, response, device, context_view_id = context_view_id_,
+       rpc_description, done](const Status& status) {
         for (auto handle : inputs) {
           handle->Unref();
         }
@@ -60,19 +72,22 @@ Status RemoteExecuteNode::Run() {
         for (size_t i = 0; i < retvals.size(); ++i) {
           if (status.ok()) {
             Status s = retvals[i]->SetRemoteShape(
-                response->queue_response(0).shape(i), device);
+                response->queue_response(0).shape(i), device, context_view_id);
             if (!s.ok()) {
               LOG(ERROR) << "Ignoring an error encountered when setting "
                             "remote shape of tensor handle: "
-                         << retvals[i] << " with status: " << status.ToString()
+                         << retvals[i]
+                         << " with execute status: " << status.ToString()
+                         << " and SetRemoteShape status: " << s.ToString()
                          << "\nThis should never happen. "
                             "Please file an issue with the TensorFlow Team.";
             }
           } else {
-            retvals[i]->Poison(status);
+            retvals[i]->PoisonRemote(status, device, context_view_id);
           }
           retvals[i]->Unref();
         }
+        done(status);
         delete response;
       });
 }

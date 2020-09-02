@@ -51,20 +51,16 @@ void SplitCustom<Device, T>::operator()(
   template struct Split<Eigen::GpuDevice, T, 2>; \
   template struct Split<Eigen::GpuDevice, T, 3>;
 
-TF_CALL_GPU_NUMBER_TYPES(DEFINE_GPU_KERNELS);
-TF_CALL_complex64(DEFINE_GPU_KERNELS);
-TF_CALL_complex128(DEFINE_GPU_KERNELS);
 TF_CALL_int64(DEFINE_GPU_KERNELS);
 TF_CALL_bfloat16(DEFINE_GPU_KERNELS);
 TF_CALL_uint8(DEFINE_GPU_KERNELS);
-TF_CALL_bool(DEFINE_GPU_KERNELS);
+TF_CALL_GPU_ALL_TYPES(DEFINE_GPU_KERNELS);
 
 #undef DEFINE_GPU_KERNELS
 #define DEFINE_GPU_KERNELS(T) template struct SplitCustom<Eigen::GpuDevice, T>;
 
 TF_CALL_GPU_NUMBER_TYPES(DEFINE_GPU_KERNELS);
-TF_CALL_complex64(DEFINE_GPU_KERNELS);
-TF_CALL_complex128(DEFINE_GPU_KERNELS);
+TF_CALL_COMPLEX_TYPES(DEFINE_GPU_KERNELS);
 TF_CALL_bfloat16(DEFINE_GPU_KERNELS);
 
 #undef DEFINE_GPU_KERNELS
@@ -74,8 +70,9 @@ TF_CALL_bfloat16(DEFINE_GPU_KERNELS);
 namespace {
 
 template <typename T>
-__global__ void SplitOpKernel(const T* input, int32 prefix_dim_size,
-                              int32 split_dim_size, int32 suffix_dim_size,
+__global__ void SplitOpKernel(const T* __restrict__ input,
+                              int32 prefix_dim_size, int32 split_dim_size,
+                              int32 suffix_dim_size,
                               GpuDeviceArrayStruct<T*> output_ptr_data) {
   const int32 num_split = output_ptr_data.size;
   T** output_ptrs = GetGpuDeviceArrayOnDevice(&output_ptr_data);
@@ -112,7 +109,7 @@ __global__ void SplitOpKernel(const T* input, int32 prefix_dim_size,
 // very similar to the concat kernel except the input/output logic
 // is reversed
 template <typename T, typename IntType, bool useSmem>
-__global__ void split_v_kernel(const T* input_ptr,
+__global__ void split_v_kernel(const T* __restrict__ input_ptr,
                                GpuDeviceArrayStruct<IntType> output_scan,
                                IntType total_rows, IntType total_cols,
                                GpuDeviceArrayStruct<T*> output_ptr_data) {
@@ -169,7 +166,8 @@ __global__ void split_v_kernel(const T* input_ptr,
 // different from the original split implementation due to 2D vs 3D
 // dimensions.  This version is likely faster due to less integer math.
 template <typename T>
-__global__ void SplitVOpKernel_fixed(const T* input, int32 prefix_dim_size,
+__global__ void SplitVOpKernel_fixed(const T* __restrict__ input,
+                                     int32 prefix_dim_size,
                                      int32 suffix_dim_size,
                                      GpuDeviceArrayStruct<T*> output_ptr_data) {
   const int32 num_split = output_ptr_data.size;
@@ -246,8 +244,7 @@ void SplitVOpGPULaunch<T, IntType>::Run(
 #define REGISTER_GPU_KERNEL(T) template struct SplitOpGPULaunch<T>;
 
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU_KERNEL);
-TF_CALL_complex64(REGISTER_GPU_KERNEL);
-TF_CALL_complex128(REGISTER_GPU_KERNEL);
+TF_CALL_COMPLEX_TYPES(REGISTER_GPU_KERNEL);
 TF_CALL_bfloat16(REGISTER_GPU_KERNEL);
 #undef REGISTER_GPU_KERNEL
 #define REGISTER_GPU_KERNEL(T)                 \
@@ -255,8 +252,7 @@ TF_CALL_bfloat16(REGISTER_GPU_KERNEL);
   template struct SplitVOpGPULaunch<T, int64>;
 
 TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU_KERNEL);
-TF_CALL_complex64(REGISTER_GPU_KERNEL);
-TF_CALL_complex128(REGISTER_GPU_KERNEL);
+TF_CALL_COMPLEX_TYPES(REGISTER_GPU_KERNEL);
 TF_CALL_bfloat16(REGISTER_GPU_KERNEL);
 #undef REGISTER_GPU_KERNEL
 

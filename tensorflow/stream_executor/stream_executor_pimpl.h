@@ -23,8 +23,10 @@ limitations under the License.
 #include <vector>
 
 #include "absl/base/macros.h"
+#include "absl/memory/memory.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/optional.h"
+#include "tensorflow/core/platform/thread_annotations.h"
 #include "tensorflow/stream_executor/device_memory_allocator.h"
 #include "tensorflow/stream_executor/lib/status.h"
 #include "tensorflow/stream_executor/lib/statusor.h"
@@ -32,7 +34,6 @@ limitations under the License.
 #include "tensorflow/stream_executor/platform.h"
 #include "tensorflow/stream_executor/platform/logging.h"
 #include "tensorflow/stream_executor/platform/port.h"
-#include "tensorflow/stream_executor/platform/thread_annotations.h"
 #include "tensorflow/stream_executor/rng.h"
 #include "tensorflow/stream_executor/shared_memory_config.h"
 #include "tensorflow/stream_executor/stream.h"
@@ -49,7 +50,7 @@ struct AllocRecord {
   // Holds a representation of the stack at the time the associated buffer was
   // allocated. Produced in a form described in
   // //util/symbolize/symbolized_stacktrace.h.
-  string stack_trace;
+  std::string stack_trace;
 };
 
 // Forward declaration of private friend class.
@@ -120,7 +121,7 @@ class StreamExecutor {
   // Synchronously allocates an array on the device of type T with element_count
   // elements.
   template <typename T>
-  DeviceMemory<T> AllocateArray(uint64 element_count);
+  DeviceMemory<T> AllocateArray(uint64 element_count, int64 memory_space = 0);
 
   // As AllocateArray(), but returns a ScopedDeviceMemory<T>.
   template <typename T>
@@ -174,12 +175,12 @@ class StreamExecutor {
   // If `module_handle` is set then searches only within the module
   // corresponding to `module_handle`.
   template <typename T>
-  port::StatusOr<DeviceMemory<T>> GetSymbol(const string &symbol_name,
+  port::StatusOr<DeviceMemory<T>> GetSymbol(const std::string &symbol_name,
                                             ModuleHandle module_handle = {});
 
   // An untyped version of GetSymbol.
   port::StatusOr<DeviceMemoryBase> GetUntypedSymbol(
-      const string &symbol_name, ModuleHandle module_handle = {});
+      const std::string &symbol_name, ModuleHandle module_handle = {});
 
   // Deallocate the DeviceMemory previously allocated via this interface.
   // Deallocation of a nullptr-representative value is permitted.
@@ -233,13 +234,13 @@ class StreamExecutor {
 
   // Blocks the caller while "size" bytes are zeroed out (in POD fashion) at the
   // given location in device memory.
-  bool SynchronousMemZero(DeviceMemoryBase *location,
-                          uint64 size) SE_MUST_USE_RESULT;
+  port::Status SynchronousMemZero(DeviceMemoryBase *location,
+                                  uint64 size) SE_MUST_USE_RESULT;
 
   // Blocks the caller while "size" bytes are initialized to "value" (in POD
   // fashion) at the given location in device memory.
-  bool SynchronousMemSet(DeviceMemoryBase *location, int value,
-                         uint64 size) SE_MUST_USE_RESULT;
+  port::Status SynchronousMemSet(DeviceMemoryBase *location, int value,
+                                 uint64 size) SE_MUST_USE_RESULT;
 
   // [deprecated] Blocks the caller while a data segment of the given size is
   // copied from the host source to the device destination.
@@ -294,15 +295,15 @@ class StreamExecutor {
   // Enqueues an operation onto stream to zero out size bytes at the given
   // device memory location. Neither stream nor location may be null. Returns
   // whether the operation was successfully enqueued onto the stream.
-  bool MemZero(Stream *stream, DeviceMemoryBase *location,
-               uint64 size) SE_MUST_USE_RESULT;
+  port::Status MemZero(Stream *stream, DeviceMemoryBase *location,
+                       uint64 size) SE_MUST_USE_RESULT;
 
   // Enqueues an operation onto stream to set 32-bit patterns starting at
   // location, for byte count given by size. size must be 32-bit quantified
   // (i.e. evently divisible by 4). Returns whether the operation was
   // successfully enqueued onto the stream.
-  bool Memset32(Stream *stream, DeviceMemoryBase *location, uint32 pattern,
-                uint64 size) SE_MUST_USE_RESULT;
+  port::Status Memset32(Stream *stream, DeviceMemoryBase *location,
+                        uint32 pattern, uint64 size);
 
   // Enables peer access from this StreamExecutor to memory
   // allocated by other, such that launched device code, memcpies, etc may
@@ -371,6 +372,19 @@ class StreamExecutor {
   // operation.
   bool GetConvolveAlgorithms(bool with_winograd_nonfused,
                              std::vector<dnn::AlgorithmDesc> *out_algorithms);
+
+  // Returns the list of supported algorithms for the forward convolution
+  // operation.
+  bool GetMIOpenConvolveAlgorithms(
+      dnn::ConvolutionKind kind, dnn::DataType element_type, Stream *stream,
+      const dnn::BatchDescriptor &input_descriptor, DeviceMemoryBase input_data,
+      const dnn::FilterDescriptor &filter_descriptor,
+      DeviceMemoryBase filter_data,
+      const dnn::BatchDescriptor &output_descriptor,
+      DeviceMemoryBase output_data,
+      const dnn::ConvolutionDescriptor &convolution_descriptor,
+      ScratchAllocator *scratch_allocator,
+      std::vector<dnn::ProfileResult> *out_algorithms);
 
   // Returns the list of supported algorithms for rnn operation.
   bool GetRnnAlgorithms(std::vector<dnn::AlgorithmDesc> *out_algorithms);
@@ -520,9 +534,9 @@ class StreamExecutor {
   friend struct ThenBlasImpl;
 
   // Synchronously allocates size bytes on the underlying platform and returns
-  // an opaque void* representing that allocation. In the case of failure,
+  // a DeviceMemoryBase representing that allocation. In the case of failure,
   // nullptr is returned.
-  void *Allocate(uint64 size);
+  DeviceMemoryBase Allocate(uint64 size, int64 memory_space);
 
   // Gets-or-creates (creates with memoization) an RngSupport datatype that can
   // be used for random-number-generation routines on the current platform.
@@ -543,7 +557,7 @@ class StreamExecutor {
 
   // Finds and retrieves device memory for the symbol on the underlying
   // platform.
-  bool GetSymbol(const string &symbol_name, ModuleHandle module_handle,
+  bool GetSymbol(const std::string &symbol_name, ModuleHandle module_handle,
                  void **mem, size_t *bytes);
 
   // Entrains a memcpy operation onto stream, with a host destination location
@@ -656,15 +670,15 @@ class StreamExecutor {
   // A mapping of pointer (to device memory) to string representation of the
   // stack (of the allocating thread) at the time at which the pointer was
   // allocated.
-  std::map<void *, AllocRecord> mem_allocs_ GUARDED_BY(mu_);
+  std::map<void *, AllocRecord> mem_allocs_ TF_GUARDED_BY(mu_);
 
   // Memoized BLAS support object -- we only want to create this once when asked
   // for a BLAS interface.
-  std::unique_ptr<blas::BlasSupport> blas_ GUARDED_BY(mu_);
+  std::unique_ptr<blas::BlasSupport> blas_ TF_GUARDED_BY(mu_);
 
   // Memoized DNN support object -- we only want to create this once when asked
   // for an DNN interface.
-  std::unique_ptr<dnn::DnnSupport> dnn_ GUARDED_BY(mu_);
+  std::unique_ptr<dnn::DnnSupport> dnn_ TF_GUARDED_BY(mu_);
 
   // Memoized FFT support object -- we only want to create this once when asked
   // for a FFT interface.
@@ -672,12 +686,12 @@ class StreamExecutor {
 
   // Memoized RNG support object -- we only want to create this once when asked
   // for an RNG interface.
-  std::unique_ptr<rng::RngSupport> rng_ GUARDED_BY(mu_);
+  std::unique_ptr<rng::RngSupport> rng_ TF_GUARDED_BY(mu_);
 
   // Slot to cache the owned DeviceDescription for the underlying device
-  // once it has been quieried from DeviceDescription().
+  // once it has been queried from DeviceDescription().
   mutable std::unique_ptr<DeviceDescription> device_description_
-      GUARDED_BY(mu_);
+      TF_GUARDED_BY(mu_);
 
   // The kind of the underlying platform that is being targeted, as passed
   // during construction.
@@ -709,13 +723,13 @@ class StreamExecutor {
 
   // Only one worker thread is needed; little work will be done by the
   // executor.
-  static const int kNumBackgroundThreads = 1;
+  static constexpr int kNumBackgroundThreads = 1;
 
   // Indicates if StreamExecutor operation tracing should be performed.
   bool tracing_enabled_;
 
   // The set of TraceListeners registered for this StreamExecutor.
-  std::set<TraceListener*> listeners_ GUARDED_BY(mu_);
+  std::set<TraceListener *> listeners_ TF_GUARDED_BY(mu_);
 
   // Allocated memory in bytes.
   int64 mem_alloc_bytes_;
@@ -786,15 +800,15 @@ StreamExecutor::CreateTypedKernel(absl::string_view kernel_name,
 }
 
 template <typename T>
-inline DeviceMemory<T> StreamExecutor::AllocateArray(uint64 element_count) {
+inline DeviceMemory<T> StreamExecutor::AllocateArray(uint64 element_count,
+                                                     int64 memory_space) {
   uint64 bytes = sizeof(T) * element_count;
-  void *opaque = Allocate(bytes);
-  return DeviceMemory<T>::MakeFromByteSize(opaque, bytes);
+  return DeviceMemory<T>(Allocate(bytes, memory_space));
 }
 
 template <typename T>
 inline port::StatusOr<DeviceMemory<T>> StreamExecutor::GetSymbol(
-    const string &symbol_name, ModuleHandle module_handle) {
+    const std::string &symbol_name, ModuleHandle module_handle) {
   port::StatusOr<DeviceMemoryBase> untyped_symbol =
       GetUntypedSymbol(symbol_name, module_handle);
   if (!untyped_symbol.ok()) {
@@ -825,13 +839,13 @@ ScopedDeviceMemory<ElemT>::ScopedDeviceMemory(
 
 template <typename T>
 DeviceMemory<T> StreamExecutor::AllocateZeroed() {
-  void *opaque = Allocate(sizeof(T));
-  if (opaque == nullptr) {
+  DeviceMemoryBase buf = Allocate(sizeof(T), /*memory_space=*/0);
+  if (buf.is_null()) {
     return DeviceMemory<T>{};
   }
 
-  DeviceMemory<T> result = DeviceMemory<T>::MakeFromByteSize(opaque, sizeof(T));
-  bool ok = SynchronousMemZero(&result, sizeof(T));
+  DeviceMemory<T> result(buf);
+  bool ok = SynchronousMemZero(&result, sizeof(T)).ok();
   if (!ok) {
     Deallocate(&result);
     return DeviceMemory<T>{};

@@ -20,7 +20,7 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/string.h"
+#include "tensorflow/lite/string_type.h"
 
 namespace tflite {
 namespace {
@@ -47,7 +47,7 @@ class MockErrorReporter : public ErrorReporter {
 class MockDataAllocator : public BuiltinDataAllocator {
  public:
   MockDataAllocator() : is_allocated_(false) {}
-  void* Allocate(size_t size) override {
+  void* Allocate(size_t size, size_t alignment_hint) override {
     EXPECT_FALSE(is_allocated_);
     const int max_size = kBufferSize;
     EXPECT_LE(size, max_size);
@@ -93,15 +93,12 @@ TEST_F(FlatbufferConversionsTest, ParseBadSqueeze) {
                   "Input array not provided for operation 'squeeze'"));
 }
 
-TEST_F(FlatbufferConversionsTest, ParseBadReshape) {
+TEST_F(FlatbufferConversionsTest, ParseDynamicReshape) {
   const Operator* op = BuildTestOperator(
-      BuiltinOptions_ReshapeOptions, CreateSqueezeOptions(builder_).Union());
+      BuiltinOptions_ReshapeOptions, CreateReshapeOptions(builder_).Union());
   void* output_data = nullptr;
-  EXPECT_NE(kTfLiteOk, ParseOpData(op, BuiltinOperator_RESHAPE, &mock_reporter_,
+  EXPECT_EQ(kTfLiteOk, ParseOpData(op, BuiltinOperator_RESHAPE, &mock_reporter_,
                                    &mock_allocator_, &output_data));
-  EXPECT_THAT(mock_reporter_.GetAsString(),
-              ::testing::ContainsRegex(
-                  "Input array not provided for operation 'reshape'"));
 }
 
 TEST_F(FlatbufferConversionsTest, TestParseOpDataConv) {

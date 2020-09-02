@@ -170,6 +170,7 @@ class StridedSliceOp : public OpKernel {
       HANDLE_DIM(5);
       HANDLE_DIM(6);
       HANDLE_DIM(7);
+      HANDLE_DIM(8);
 
 #undef HANDLE_DIM
 
@@ -268,6 +269,7 @@ class StridedSliceGradOp : public OpKernel {
     HANDLE_DIM(5);
     HANDLE_DIM(6);
     HANDLE_DIM(7);
+    HANDLE_DIM(8);
 
 #undef HANDLE_DIM
   }
@@ -384,6 +386,7 @@ class StridedSliceAssignOp : public OpKernel {
       HANDLE_DIM(5);
       HANDLE_DIM(6);
       HANDLE_DIM(7);
+      HANDLE_DIM(8);
 #undef HANDLE_DIM
 
       OP_REQUIRES(context, false,
@@ -483,12 +486,9 @@ TF_CALL_uint64(REGISTER_STRIDED_SLICE);
                               .HostMemory("strides"),                   \
                           StridedSliceAssignOp<GPUDevice, type, true>)
 
-TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU);
-TF_CALL_bool(REGISTER_GPU);
 TF_CALL_int8(REGISTER_GPU);
-TF_CALL_complex64(REGISTER_GPU);
-TF_CALL_complex128(REGISTER_GPU);
 TF_CALL_int64(REGISTER_GPU);
+TF_CALL_GPU_ALL_TYPES(REGISTER_GPU);
 
 // A special GPU kernel for int32.
 // TODO(b/25387198): Also enable int32 in device memory. This kernel

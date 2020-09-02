@@ -28,8 +28,8 @@ typedef Eigen::GpuDevice GPUDevice;
 
 template <typename T, typename Index, int IXDIM>
 __global__ void GatherSliceOpKernel(
-    const T* params, const Index* indices, T* out,
-    const Eigen::array<int64, IXDIM> batch_strides,
+    const T* __restrict__ params, const Index* __restrict__ indices,
+    T* __restrict__ out, const Eigen::array<int64, IXDIM> batch_strides,
     const Eigen::array<int64, IXDIM> batch_indices, const int64 indices_size,
     const int64 slice_size, const int64 out_size) {
   // TODO(ebrevdo): reduce inner loop into two loops:
@@ -121,8 +121,7 @@ struct GatherNdSlice<GPUDevice, T, Index, IXDIM> {
 TF_CALL_int32(DEFINE_GPU_SPECS);
 TF_CALL_int64(DEFINE_GPU_SPECS);
 TF_CALL_GPU_NUMBER_TYPES(DEFINE_GPU_SPECS);
-TF_CALL_complex64(DEFINE_GPU_SPECS);
-TF_CALL_complex128(DEFINE_GPU_SPECS);
+TF_CALL_COMPLEX_TYPES(DEFINE_GPU_SPECS);
 
 #undef DEFINE_GPU_SPECS
 #undef DEFINE_GPU_SPECS_INDEX

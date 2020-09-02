@@ -12,15 +12,20 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#include <string.h>
-#include <vector>
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/c_api_internal.h"
+#include "tensorflow/lite/kernels/internal/reference/pad.h"
+
+#include <stdint.h>
+
+#include <limits>
+
+#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/kernels/internal/compatibility.h"
 #include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
 #include "tensorflow/lite/kernels/internal/reference/reference_ops.h"
 #include "tensorflow/lite/kernels/internal/tensor.h"
+#include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
+#include "tensorflow/lite/kernels/internal/types.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
-#include "tensorflow/lite/kernels/op_macros.h"
 
 namespace tflite {
 namespace ops {
@@ -74,9 +79,7 @@ TfLiteStatus ResizeOutputTensor(TfLiteContext* context,
                     op_context->dims);
   TF_LITE_ENSURE_EQ(context, SizeOfDimension(op_context->paddings, 1), 2);
 
-  // Determines the size of the output tensor.
-  TfLiteIntArray* input_size = op_context->input->dims;
-  TfLiteIntArray* output_size = TfLiteIntArrayCopy(input_size);
+  // Ensures all the elements of the paddings is non-negative.
   const int32* paddings_data = GetTensorData<int32>(op_context->paddings);
 
   for (int idx = 0; idx < op_context->dims; ++idx) {
@@ -85,6 +88,16 @@ TfLiteStatus ResizeOutputTensor(TfLiteContext* context,
 
     TF_LITE_ENSURE_MSG(context, (before_padding >= 0 && after_padding >= 0),
                        "Pad value has to be greater than equal to 0.");
+  }
+
+  // Determines the size of the output tensor.
+  TfLiteIntArray* input_size = op_context->input->dims;
+  TfLiteIntArray* output_size = TfLiteIntArrayCopy(input_size);
+  paddings_data = GetTensorData<int32>(op_context->paddings);
+
+  for (int idx = 0; idx < op_context->dims; ++idx) {
+    int before_padding = *paddings_data++;
+    int after_padding = *paddings_data++;
 
     output_size->data[idx] =
         (input_size->data[idx] + before_padding + after_padding);
@@ -98,18 +111,22 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   TF_LITE_ENSURE_EQ(context, NumOutputs(node), 1);
 
   PadContext op_context(context, node);
-  TF_LITE_ENSURE_EQ(context, op_context.input->type, op_context.output->type);
+  TF_LITE_ENSURE_TYPES_EQ(context, op_context.input->type,
+                          op_context.output->type);
   if (op_context.constant_values != nullptr) {
-    TF_LITE_ENSURE_EQ(context, op_context.input->type,
-                      op_context.constant_values->type);
+    TF_LITE_ENSURE_TYPES_EQ(context, op_context.input->type,
+                            op_context.constant_values->type);
   }
 
   // TODO(nupurgarg): Current implementations rely on the inputs being <= 4D.
-  TF_LITE_ENSURE(context, op_context.dims <= 4);
+  TF_LITE_ENSURE(
+      context, op_context.dims <= reference_ops::PadKernelMaxDimensionCount());
 
-  // Exit early if paddings is a non-const tensor. Set output tensor to
-  // dynamic so output size can be determined in Eval.
-  if (!IsConstantTensor(op_context.paddings)) {
+  // Exit early if paddings is a non-const tensor or the given input is an
+  // unranked input. Set output tensor to dynamic so output size can be
+  // determined in Eval.
+  if (NumDimensions(op_context.input) == 0 ||
+      !IsConstantTensor(op_context.paddings)) {
     SetTensorToDynamic(op_context.output);
     return kTfLiteOk;
   }
@@ -130,32 +147,22 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
     TF_LITE_ENSURE_OK(context, ResizeOutputTensor(context, &op_context));
   }
 
-  // TODO(nupurgarg): Change kernel implementation to take in int* instead of
-  // vector<int> to remove malloc from Eval().
   // Create before and after padding arrays that are accepted by the kernel.
-  std::vector<int> before_padding;
-  std::vector<int> after_padding;
   const int32* paddings_data = GetTensorData<int32>(op_context.paddings);
 
-  // TODO(nupurgarg): Change kernel implementation to use padding arrays in
-  // forward order (depth, width, height, batch).
-  // Build paddings in order of int[] = {batch, height, width, depth} to match
-  // kernel implementation of Pad in reference_ops.h and optimized_ops.h.
+  TF_LITE_ENSURE(
+      context, op_context.dims <= reference_ops::PadKernelMaxDimensionCount());
+
+  tflite::PadParams op_params;
+  op_params.left_padding_count = op_context.dims;
+  op_params.right_padding_count = op_context.dims;
+
   for (int idx = op_context.dims - 1; idx >= 0; --idx) {
-    before_padding.push_back(paddings_data[idx * 2]);
-    after_padding.push_back(paddings_data[idx * 2 + 1]);
+    op_params.left_padding[idx] = paddings_data[idx * 2];
+    op_params.right_padding[idx] = paddings_data[idx * 2 + 1];
   }
 
 #define TF_LITE_PAD(type, op_name, scalar, pad_value)                     \
-  TF_LITE_ENSURE(context, before_padding.size() <= 4);                    \
-  TF_LITE_ENSURE(context, after_padding.size() <= 4);                     \
-  tflite::PadParams op_params;                                            \
-  op_params.left_padding_count = before_padding.size();                   \
-  op_params.right_padding_count = after_padding.size();                   \
-  for (int i = 0; i < op_context.dims; ++i) {                             \
-    op_params.left_padding[i] = before_padding[op_context.dims - 1 - i];  \
-    op_params.right_padding[i] = after_padding[op_context.dims - 1 - i];  \
-  }                                                                       \
   const scalar pad_value_copy = pad_value;                                \
                                                                           \
   type::op_name(op_params, GetTensorShape(op_context.input),              \
@@ -262,9 +269,8 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
       }
     } break;
     default:
-      context->ReportError(context,
-                           "Type %d is currently not supported by Pad.",
-                           op_context.input->type);
+      TF_LITE_KERNEL_LOG(context, "Type %s is currently not supported by Pad.",
+                         TfLiteTypeGetName(op_context.input->type));
       return kTfLiteError;
   }
 #undef TF_LITE_PAD

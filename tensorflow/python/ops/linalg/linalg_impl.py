@@ -29,6 +29,7 @@ from tensorflow.python.ops import check_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import gen_linalg_ops
 from tensorflow.python.ops import linalg_ops
+from tensorflow.python.ops import map_fn
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import special_math_ops
 from tensorflow.python.util import dispatch
@@ -40,7 +41,7 @@ cholesky = linalg_ops.cholesky
 cholesky_solve = linalg_ops.cholesky_solve
 det = linalg_ops.matrix_determinant
 slogdet = gen_linalg_ops.log_matrix_determinant
-tf_export('linalg.slogdet')(slogdet)
+tf_export('linalg.slogdet')(dispatch.add_dispatch_support(slogdet))
 diag = array_ops.matrix_diag
 diag_part = array_ops.matrix_diag_part
 eigh = linalg_ops.self_adjoint_eig
@@ -50,7 +51,7 @@ eye = linalg_ops.eye
 inv = linalg_ops.matrix_inverse
 logm = gen_linalg_ops.matrix_logarithm
 lu = gen_linalg_ops.lu
-tf_export('linalg.logm')(logm)
+tf_export('linalg.logm')(dispatch.add_dispatch_support(logm))
 lstsq = linalg_ops.matrix_solve_ls
 norm = linalg_ops.norm
 qr = linalg_ops.qr
@@ -229,6 +230,7 @@ def _matrix_exp_pade13(matrix):
 
 
 @tf_export('linalg.expm')
+@dispatch.add_dispatch_support
 def matrix_exponential(input, name=None):  # pylint: disable=redefined-builtin
   r"""Computes the matrix exponential of one or more square matrices.
 
@@ -273,16 +275,16 @@ def matrix_exponential(input, name=None):  # pylint: disable=redefined-builtin
         math_ops.reduce_sum(
             math_ops.abs(matrix),
             axis=array_ops.size(array_ops.shape(matrix)) - 2),
-        axis=-1)
+        axis=-1)[..., array_ops.newaxis, array_ops.newaxis]
     const = lambda x: constant_op.constant(x, l1_norm.dtype)
 
     def _nest_where(vals, cases):
       assert len(vals) == len(cases) - 1
       if len(vals) == 1:
-        return array_ops.where(
+        return array_ops.where_v2(
             math_ops.less(l1_norm, const(vals[0])), cases[0], cases[1])
       else:
-        return array_ops.where(
+        return array_ops.where_v2(
             math_ops.less(l1_norm, const(vals[0])), cases[0],
             _nest_where(vals[1:], cases[1:]))
 
@@ -293,11 +295,9 @@ def matrix_exponential(input, name=None):  # pylint: disable=redefined-builtin
               math_ops.log(l1_norm / maxnorm) / math_ops.log(const(2.0))), 0)
       u3, v3 = _matrix_exp_pade3(matrix)
       u5, v5 = _matrix_exp_pade5(matrix)
-      u7, v7 = _matrix_exp_pade7(matrix / math_ops.pow(
-          constant_op.constant(2.0, dtype=matrix.dtype),
-          math_ops.cast(
-              squarings,
-              matrix.dtype))[..., array_ops.newaxis, array_ops.newaxis])
+      u7, v7 = _matrix_exp_pade7(
+          matrix /
+          math_ops.cast(math_ops.pow(const(2.0), squarings), matrix.dtype))
       conds = (4.258730016922831e-001, 1.880152677804762e+000)
       u = _nest_where(conds, (u3, u5, u7))
       v = _nest_where(conds, (v3, v5, v7))
@@ -310,11 +310,9 @@ def matrix_exponential(input, name=None):  # pylint: disable=redefined-builtin
       u5, v5 = _matrix_exp_pade5(matrix)
       u7, v7 = _matrix_exp_pade7(matrix)
       u9, v9 = _matrix_exp_pade9(matrix)
-      u13, v13 = _matrix_exp_pade13(matrix / math_ops.pow(
-          constant_op.constant(2.0, dtype=matrix.dtype),
-          math_ops.cast(
-              squarings,
-              matrix.dtype))[..., array_ops.newaxis, array_ops.newaxis])
+      u13, v13 = _matrix_exp_pade13(
+          matrix /
+          math_ops.cast(math_ops.pow(const(2.0), squarings), matrix.dtype))
       conds = (1.495585217958292e-002, 2.539398330063230e-001,
                9.504178996162932e-001, 2.097847961257068e+000)
       u = _nest_where(conds, (u3, u5, u7, u9, u13))
@@ -331,7 +329,7 @@ def matrix_exponential(input, name=None):  # pylint: disable=redefined-builtin
     c = lambda i, r: math_ops.less(i, max_squarings)
 
     def b(i, r):
-      return i + 1, array_ops.where(
+      return i + 1, array_ops.where_v2(
           math_ops.less(i, squarings), math_ops.matmul(r, r), r)
 
     _, result = control_flow_ops.while_loop(c, b, [i, result])
@@ -342,7 +340,104 @@ def matrix_exponential(input, name=None):  # pylint: disable=redefined-builtin
     return array_ops.reshape(result, batch_shape.concatenate(result.shape[-2:]))
 
 
+@tf_export('linalg.banded_triangular_solve', v1=[])
+def banded_triangular_solve(
+    bands,
+    rhs,
+    lower=True,
+    adjoint=False,  # pylint: disable=redefined-outer-name
+    name=None):
+  r"""Solve triangular systems of equations with a banded solver.
+
+  `bands` is a tensor of shape `[..., K, M]`, where `K` represents the number
+  of bands stored. This corresponds to a batch of `M` by `M` matrices, whose
+  `K` subdiagonals (when `lower` is `True`) are stored.
+
+  This operator broadcasts the batch dimensions of `bands` and the batch
+  dimensions of `rhs`.
+
+
+  Examples:
+
+  Storing 2 bands of a 3x3 matrix.
+  Note that first element in the second row is ignored due to
+  the 'LEFT_RIGHT' padding.
+
+  >>> x = [[2., 3., 4.], [1., 2., 3.]]
+  >>> x2 = [[2., 3., 4.], [10000., 2., 3.]]
+  >>> y = tf.zeros([3, 3])
+  >>> z = tf.linalg.set_diag(y, x, align='LEFT_RIGHT', k=(-1, 0))
+  >>> z
+  <tf.Tensor: shape=(3, 3), dtype=float32, numpy=
+  array([[2., 0., 0.],
+         [2., 3., 0.],
+         [0., 3., 4.]], dtype=float32)>
+  >>> soln = tf.linalg.banded_triangular_solve(x, tf.ones([3, 1]))
+  >>> soln
+  <tf.Tensor: shape=(3, 1), dtype=float32, numpy=
+  array([[0.5 ],
+         [0.  ],
+         [0.25]], dtype=float32)>
+  >>> are_equal = soln == tf.linalg.banded_triangular_solve(x2, tf.ones([3, 1]))
+  >>> tf.reduce_all(are_equal).numpy()
+  True
+  >>> are_equal = soln == tf.linalg.triangular_solve(z, tf.ones([3, 1]))
+  >>> tf.reduce_all(are_equal).numpy()
+  True
+
+  Storing 2 superdiagonals of a 4x4 matrix. Because of the 'LEFT_RIGHT' padding
+  the last element of the first row is ignored.
+
+  >>> x = [[2., 3., 4., 5.], [-1., -2., -3., -4.]]
+  >>> y = tf.zeros([4, 4])
+  >>> z = tf.linalg.set_diag(y, x, align='LEFT_RIGHT', k=(0, 1))
+  >>> z
+  <tf.Tensor: shape=(4, 4), dtype=float32, numpy=
+  array([[-1.,  2.,  0.,  0.],
+         [ 0., -2.,  3.,  0.],
+         [ 0.,  0., -3.,  4.],
+         [ 0.,  0., -0., -4.]], dtype=float32)>
+  >>> soln = tf.linalg.banded_triangular_solve(x, tf.ones([4, 1]), lower=False)
+  >>> soln
+  <tf.Tensor: shape=(4, 1), dtype=float32, numpy=
+  array([[-4.       ],
+         [-1.5      ],
+         [-0.6666667],
+         [-0.25     ]], dtype=float32)>
+  >>> are_equal = (soln == tf.linalg.triangular_solve(
+  ...   z, tf.ones([4, 1]), lower=False))
+  >>> tf.reduce_all(are_equal).numpy()
+  True
+
+
+  Args:
+    bands: A `Tensor` describing the bands of the left hand side, with shape
+      `[..., K, M]`. The `K` rows correspond to the diagonal to the `K - 1`-th
+      diagonal (the diagonal is the top row) when `lower` is `True` and
+      otherwise the `K - 1`-th superdiagonal to the diagonal (the diagonal is
+      the bottom row) when `lower` is `False`. The bands are stored with
+      'LEFT_RIGHT' alignment, where the superdiagonals are padded on the right
+      and subdiagonals are padded on the left. This is the alignment cuSPARSE
+      uses.  See  `tf.linalg.set_diag` for more details.
+    rhs: A `Tensor` of shape [..., M] or [..., M, N] and with the same dtype as
+      `diagonals`. Note that if the shape of `rhs` and/or `diags` isn't known
+      statically, `rhs` will be treated as a matrix rather than a vector.
+    lower: An optional `bool`. Defaults to `True`. Boolean indicating whether
+      `bands` represents a lower or upper triangular matrix.
+    adjoint: An optional `bool`. Defaults to `False`. Boolean indicating whether
+      to solve with the matrix's block-wise adjoint.
+    name:  A name to give this `Op` (optional).
+
+  Returns:
+    A `Tensor` of shape [..., M] or [..., M, N] containing the solutions.
+  """
+  with ops.name_scope(name, 'banded_triangular_solve', [bands, rhs]):
+    return gen_linalg_ops.banded_triangular_solve(
+        bands, rhs, lower=lower, adjoint=adjoint)
+
+
 @tf_export('linalg.tridiagonal_solve')
+@dispatch.add_dispatch_support
 def tridiagonal_solve(diagonals,
                       rhs,
                       diagonals_format='compact',
@@ -415,7 +510,8 @@ def tridiagonal_solve(diagonals,
       shape depends of `diagonals_format`, see description above. Must be
       `float32`, `float64`, `complex64`, or `complex128`.
     rhs: A `Tensor` of shape [..., M] or [..., M, K] and with the same dtype as
-      `diagonals`.
+      `diagonals`. Note that if the shape of `rhs` and/or `diags` isn't known
+      statically, `rhs` will be treated as a matrix rather than a vector.
     diagonals_format: one of `matrix`, `sequence`, or `compact`. Default is
       `compact`.
     transpose_rhs: If `True`, `rhs` is transposed before solving (has no effect
@@ -432,7 +528,9 @@ def tridiagonal_solve(diagonals,
 
   Raises:
     ValueError: An unsupported type is provided as input, or when the input
-    tensors have incorrect shapes.
+      tensors have incorrect shapes.
+    UnimplementedError: Whenever `partial_pivoting` is true and the backend is
+      XLA.
 
   [1] Nicholas J. Higham (2002). Accuracy and Stability of Numerical Algorithms:
   Second Edition. SIAM. p. 175. ISBN 978-0-89871-802-7.
@@ -484,23 +582,10 @@ def tridiagonal_solve(diagonals,
           'Expected last two dimensions of diagonals to be same, got {} and {}'
           .format(m1, m2))
     m = m1 or m2
-    if not m:
-      raise ValueError('The size of the matrix needs to be known for '
-                       'diagonals_format="matrix"')
-
-    # Extract diagonals; use input[..., 0, 0] as "dummy" m-th elements of sub-
-    # and superdiagonal.
-    # gather_nd slices into first indices, whereas we need to slice into the
-    # last two, so transposing back and forth is necessary.
-    dummy_idx = [0, 0]
-    indices = ([[[1, 0], [0, 0], dummy_idx]] +
-               [[[i + 1, i], [i, i], [i - 1, i]] for i in range(1, m - 1)] +
-               [[dummy_idx, [m - 1, m - 1], [m - 2, m - 1]]])
-    diagonals = array_ops.transpose(
-        array_ops.gather_nd(array_ops.transpose(diagonals), indices))
-    return _tridiagonal_solve_compact_format(diagonals, rhs, transpose_rhs,
-                                             conjugate_rhs, partial_pivoting,
-                                             name)
+    diagonals = array_ops.matrix_diag_part(
+        diagonals, k=(-1, 1), padding_value=0., align='LEFT_RIGHT')
+    return _tridiagonal_solve_compact_format(
+        diagonals, rhs, transpose_rhs, conjugate_rhs, partial_pivoting, name)
 
   raise ValueError('Unrecognized diagonals_format: {}'.format(diagonals_format))
 
@@ -508,19 +593,24 @@ def tridiagonal_solve(diagonals,
 def _tridiagonal_solve_compact_format(diagonals, rhs, transpose_rhs,
                                       conjugate_rhs, partial_pivoting, name):
   """Helper function used after the input has been cast to compact form."""
-  diags_rank, rhs_rank = len(diagonals.shape), len(rhs.shape)
+  diags_rank, rhs_rank = diagonals.shape.rank, rhs.shape.rank
 
-  if diags_rank < 2:
-    raise ValueError(
-        'Expected diagonals to have rank at least 2, got {}'.format(diags_rank))
-  if rhs_rank != diags_rank and rhs_rank != diags_rank - 1:
-    raise ValueError('Expected the rank of rhs to be {} or {}, got {}'.format(
-        diags_rank - 1, diags_rank, rhs_rank))
+  # If we know the rank of the diagonal tensor, do some static checking.
+  if diags_rank:
+    if diags_rank < 2:
+      raise ValueError(
+          'Expected diagonals to have rank at least 2, got {}'.format(
+              diags_rank))
+    if rhs_rank and rhs_rank != diags_rank and rhs_rank != diags_rank - 1:
+      raise ValueError('Expected the rank of rhs to be {} or {}, got {}'.format(
+          diags_rank - 1, diags_rank, rhs_rank))
+    if (rhs_rank and not diagonals.shape[:-2].is_compatible_with(
+        rhs.shape[:diags_rank - 2])):
+      raise ValueError('Batch shapes {} and {} are incompatible'.format(
+          diagonals.shape[:-2], rhs.shape[:diags_rank - 2]))
+
   if diagonals.shape[-2] and diagonals.shape[-2] != 3:
     raise ValueError('Expected 3 diagonals got {}'.format(diagonals.shape[-2]))
-  if not diagonals.shape[:-2].is_compatible_with(rhs.shape[:diags_rank - 2]):
-    raise ValueError('Batch shapes {} and {} are incompatible'.format(
-        diagonals.shape[:-2], rhs.shape[:diags_rank - 2]))
 
   def check_num_lhs_matches_num_rhs():
     if (diagonals.shape[-1] and rhs.shape[-2] and
@@ -529,7 +619,7 @@ def _tridiagonal_solve_compact_format(diagonals, rhs, transpose_rhs,
                        'sides to be equal, got {} and {}'.format(
                            diagonals.shape[-1], rhs.shape[-2]))
 
-  if rhs_rank == diags_rank - 1:
+  if rhs_rank and diags_rank and rhs_rank == diags_rank - 1:
     # Rhs provided as a vector, ignoring transpose_rhs
     if conjugate_rhs:
       rhs = math_ops.conj(rhs)
@@ -545,11 +635,11 @@ def _tridiagonal_solve_compact_format(diagonals, rhs, transpose_rhs,
     rhs = math_ops.conj(rhs)
 
   check_num_lhs_matches_num_rhs()
-  result = linalg_ops.tridiagonal_solve(diagonals, rhs, partial_pivoting, name)
-  return array_ops.matrix_transpose(result) if transpose_rhs else result
+  return linalg_ops.tridiagonal_solve(diagonals, rhs, partial_pivoting, name)
 
 
 @tf_export('linalg.tridiagonal_matmul')
+@dispatch.add_dispatch_support
 def tridiagonal_matmul(diagonals, rhs, diagonals_format='compact', name=None):
   r"""Multiplies tridiagonal matrix by matrix.
 
@@ -608,25 +698,15 @@ def tridiagonal_matmul(diagonals, rhs, diagonals_format='compact', name=None):
   elif diagonals_format == 'matrix':
     m1 = tensor_shape.dimension_value(diagonals.shape[-1])
     m2 = tensor_shape.dimension_value(diagonals.shape[-2])
-    if not m1 or not m2:
-      raise ValueError('The size of the matrix needs to be known for '
-                       'diagonals_format="matrix"')
-    if m1 != m2:
+    if m1 and m2 and m1 != m2:
       raise ValueError(
           'Expected last two dimensions of diagonals to be same, got {} and {}'
           .format(m1, m2))
-
-    # TODO(b/131695260): use matrix_diag_part when it supports extracting
-    # arbitrary diagonals.
-    maindiag = array_ops.matrix_diag_part(diagonals)
-    diagonals = array_ops.transpose(diagonals)
-    dummy_index = [0, 0]
-    superdiag_indices = [[i + 1, i] for i in range(0, m1 - 1)] + [dummy_index]
-    subdiag_indices = [dummy_index] + [[i - 1, i] for i in range(1, m1)]
-    superdiag = array_ops.transpose(
-        array_ops.gather_nd(diagonals, superdiag_indices))
-    subdiag = array_ops.transpose(
-        array_ops.gather_nd(diagonals, subdiag_indices))
+    diags = array_ops.matrix_diag_part(
+        diagonals, k=(-1, 1), padding_value=0., align='LEFT_RIGHT')
+    superdiag = diags[..., 0, :]
+    maindiag = diags[..., 1, :]
+    subdiag = diags[..., 2, :]
   else:
     raise ValueError('Unrecognized diagonals_format: %s' % diagonals_format)
 
@@ -657,6 +737,7 @@ def _maybe_validate_matrix(a, validate_args):
 
 
 @tf_export('linalg.matrix_rank')
+@dispatch.add_dispatch_support
 def matrix_rank(a, tol=None, validate_args=False, name=None):
   """Compute the matrix rank of one or more matrices.
 
@@ -695,6 +776,7 @@ def matrix_rank(a, tol=None, validate_args=False, name=None):
 
 
 @tf_export('linalg.pinv')
+@dispatch.add_dispatch_support
 def pinv(a, rcond=None, validate_args=False, name=None):
   """Compute the Moore-Penrose pseudo-inverse of one or more matrices.
 
@@ -821,3 +903,298 @@ def pinv(a, rcond=None, validate_args=False, name=None):
       a_pinv.set_shape(a.shape[:-2].concatenate([a.shape[-1], a.shape[-2]]))
 
     return a_pinv
+
+
+@tf_export('linalg.lu_solve')
+@dispatch.add_dispatch_support
+def lu_solve(lower_upper, perm, rhs, validate_args=False, name=None):
+  """Solves systems of linear eqns `A X = RHS`, given LU factorizations.
+
+  Note: this function does not verify the implied matrix is actually invertible
+  nor is this condition checked even when `validate_args=True`.
+
+  Args:
+    lower_upper: `lu` as returned by `tf.linalg.lu`, i.e., if `matmul(P,
+      matmul(L, U)) = X` then `lower_upper = L + U - eye`.
+    perm: `p` as returned by `tf.linag.lu`, i.e., if `matmul(P, matmul(L, U)) =
+      X` then `perm = argmax(P)`.
+    rhs: Matrix-shaped float `Tensor` representing targets for which to solve;
+      `A X = RHS`. To handle vector cases, use: `lu_solve(..., rhs[...,
+        tf.newaxis])[..., 0]`.
+    validate_args: Python `bool` indicating whether arguments should be checked
+      for correctness. Note: this function does not verify the implied matrix is
+        actually invertible, even when `validate_args=True`.
+      Default value: `False` (i.e., don't validate arguments).
+    name: Python `str` name given to ops managed by this object.
+      Default value: `None` (i.e., 'lu_solve').
+
+  Returns:
+    x: The `X` in `A @ X = RHS`.
+
+  #### Examples
+
+  ```python
+  import numpy as np
+  import tensorflow as tf
+  import tensorflow_probability as tfp
+
+  x = [[[1., 2],
+        [3, 4]],
+       [[7, 8],
+        [3, 4]]]
+  inv_x = tf.linalg.lu_solve(*tf.linalg.lu(x), rhs=tf.eye(2))
+  tf.assert_near(tf.matrix_inverse(x), inv_x)
+  # ==> True
+  ```
+
+  """
+
+  with ops.name_scope(name or 'lu_solve'):
+    lower_upper = ops.convert_to_tensor(
+        lower_upper, dtype_hint=dtypes.float32, name='lower_upper')
+    perm = ops.convert_to_tensor(perm, dtype_hint=dtypes.int32, name='perm')
+    rhs = ops.convert_to_tensor(rhs, dtype_hint=lower_upper.dtype, name='rhs')
+
+    assertions = _lu_solve_assertions(lower_upper, perm, rhs, validate_args)
+    if assertions:
+      with ops.control_dependencies(assertions):
+        lower_upper = array_ops.identity(lower_upper)
+        perm = array_ops.identity(perm)
+        rhs = array_ops.identity(rhs)
+
+    if (rhs.shape.rank == 2 and perm.shape.rank == 1):
+      # Both rhs and perm have scalar batch_shape.
+      permuted_rhs = array_ops.gather(rhs, perm, axis=-2)
+    else:
+      # Either rhs or perm have non-scalar batch_shape or we can't determine
+      # this information statically.
+      rhs_shape = array_ops.shape(rhs)
+      broadcast_batch_shape = array_ops.broadcast_dynamic_shape(
+          rhs_shape[:-2],
+          array_ops.shape(perm)[:-1])
+      d, m = rhs_shape[-2], rhs_shape[-1]
+      rhs_broadcast_shape = array_ops.concat([broadcast_batch_shape, [d, m]],
+                                             axis=0)
+
+      # Tile out rhs.
+      broadcast_rhs = array_ops.broadcast_to(rhs, rhs_broadcast_shape)
+      broadcast_rhs = array_ops.reshape(broadcast_rhs, [-1, d, m])
+
+      # Tile out perm and add batch indices.
+      broadcast_perm = array_ops.broadcast_to(perm, rhs_broadcast_shape[:-1])
+      broadcast_perm = array_ops.reshape(broadcast_perm, [-1, d])
+      broadcast_batch_size = math_ops.reduce_prod(broadcast_batch_shape)
+      broadcast_batch_indices = array_ops.broadcast_to(
+          math_ops.range(broadcast_batch_size)[:, array_ops.newaxis],
+          [broadcast_batch_size, d])
+      broadcast_perm = array_ops.stack(
+          [broadcast_batch_indices, broadcast_perm], axis=-1)
+
+      permuted_rhs = array_ops.gather_nd(broadcast_rhs, broadcast_perm)
+      permuted_rhs = array_ops.reshape(permuted_rhs, rhs_broadcast_shape)
+
+    lower = set_diag(
+        band_part(lower_upper, num_lower=-1, num_upper=0),
+        array_ops.ones(
+            array_ops.shape(lower_upper)[:-1], dtype=lower_upper.dtype))
+    return triangular_solve(
+        lower_upper,  # Only upper is accessed.
+        triangular_solve(lower, permuted_rhs),
+        lower=False)
+
+
+@tf_export('linalg.lu_matrix_inverse')
+@dispatch.add_dispatch_support
+def lu_matrix_inverse(lower_upper, perm, validate_args=False, name=None):
+  """Computes the inverse given the LU decomposition(s) of one or more matrices.
+
+  This op is conceptually identical to,
+
+  ```python
+  inv_X = tf.lu_matrix_inverse(*tf.linalg.lu(X))
+  tf.assert_near(tf.matrix_inverse(X), inv_X)
+  # ==> True
+  ```
+
+  Note: this function does not verify the implied matrix is actually invertible
+  nor is this condition checked even when `validate_args=True`.
+
+  Args:
+    lower_upper: `lu` as returned by `tf.linalg.lu`, i.e., if `matmul(P,
+      matmul(L, U)) = X` then `lower_upper = L + U - eye`.
+    perm: `p` as returned by `tf.linag.lu`, i.e., if `matmul(P, matmul(L, U)) =
+      X` then `perm = argmax(P)`.
+    validate_args: Python `bool` indicating whether arguments should be checked
+      for correctness. Note: this function does not verify the implied matrix is
+        actually invertible, even when `validate_args=True`.
+      Default value: `False` (i.e., don't validate arguments).
+    name: Python `str` name given to ops managed by this object.
+      Default value: `None` (i.e., 'lu_matrix_inverse').
+
+  Returns:
+    inv_x: The matrix_inv, i.e.,
+      `tf.matrix_inverse(tf.linalg.lu_reconstruct(lu, perm))`.
+
+  #### Examples
+
+  ```python
+  import numpy as np
+  import tensorflow as tf
+  import tensorflow_probability as tfp
+
+  x = [[[3., 4], [1, 2]],
+       [[7., 8], [3, 4]]]
+  inv_x = tf.linalg.lu_matrix_inverse(*tf.linalg.lu(x))
+  tf.assert_near(tf.matrix_inverse(x), inv_x)
+  # ==> True
+  ```
+
+  """
+
+  with ops.name_scope(name or 'lu_matrix_inverse'):
+    lower_upper = ops.convert_to_tensor(
+        lower_upper, dtype_hint=dtypes.float32, name='lower_upper')
+    perm = ops.convert_to_tensor(perm, dtype_hint=dtypes.int32, name='perm')
+    assertions = lu_reconstruct_assertions(lower_upper, perm, validate_args)
+    if assertions:
+      with ops.control_dependencies(assertions):
+        lower_upper = array_ops.identity(lower_upper)
+        perm = array_ops.identity(perm)
+    shape = array_ops.shape(lower_upper)
+    return lu_solve(
+        lower_upper,
+        perm,
+        rhs=eye(shape[-1], batch_shape=shape[:-2], dtype=lower_upper.dtype),
+        validate_args=False)
+
+
+@tf_export('linalg.lu_reconstruct')
+@dispatch.add_dispatch_support
+def lu_reconstruct(lower_upper, perm, validate_args=False, name=None):
+  """The reconstruct one or more matrices from their LU decomposition(s).
+
+  Args:
+    lower_upper: `lu` as returned by `tf.linalg.lu`, i.e., if `matmul(P,
+      matmul(L, U)) = X` then `lower_upper = L + U - eye`.
+    perm: `p` as returned by `tf.linag.lu`, i.e., if `matmul(P, matmul(L, U)) =
+      X` then `perm = argmax(P)`.
+    validate_args: Python `bool` indicating whether arguments should be checked
+      for correctness.
+      Default value: `False` (i.e., don't validate arguments).
+    name: Python `str` name given to ops managed by this object.
+      Default value: `None` (i.e., 'lu_reconstruct').
+
+  Returns:
+    x: The original input to `tf.linalg.lu`, i.e., `x` as in,
+      `lu_reconstruct(*tf.linalg.lu(x))`.
+
+  #### Examples
+
+  ```python
+  import numpy as np
+  import tensorflow as tf
+  import tensorflow_probability as tfp
+
+  x = [[[3., 4], [1, 2]],
+       [[7., 8], [3, 4]]]
+  x_reconstructed = tf.linalg.lu_reconstruct(*tf.linalg.lu(x))
+  tf.assert_near(x, x_reconstructed)
+  # ==> True
+  ```
+
+  """
+  with ops.name_scope(name or 'lu_reconstruct'):
+    lower_upper = ops.convert_to_tensor(
+        lower_upper, dtype_hint=dtypes.float32, name='lower_upper')
+    perm = ops.convert_to_tensor(perm, dtype_hint=dtypes.int32, name='perm')
+
+    assertions = lu_reconstruct_assertions(lower_upper, perm, validate_args)
+    if assertions:
+      with ops.control_dependencies(assertions):
+        lower_upper = array_ops.identity(lower_upper)
+        perm = array_ops.identity(perm)
+
+    shape = array_ops.shape(lower_upper)
+
+    lower = set_diag(
+        band_part(lower_upper, num_lower=-1, num_upper=0),
+        array_ops.ones(shape[:-1], dtype=lower_upper.dtype))
+    upper = band_part(lower_upper, num_lower=0, num_upper=-1)
+    x = math_ops.matmul(lower, upper)
+
+    if (lower_upper.shape is None or lower_upper.shape.rank is None or
+        lower_upper.shape.rank != 2):
+      # We either don't know the batch rank or there are >0 batch dims.
+      batch_size = math_ops.reduce_prod(shape[:-2])
+      d = shape[-1]
+      x = array_ops.reshape(x, [batch_size, d, d])
+      perm = array_ops.reshape(perm, [batch_size, d])
+      perm = map_fn.map_fn(array_ops.invert_permutation, perm)
+      batch_indices = array_ops.broadcast_to(
+          math_ops.range(batch_size)[:, array_ops.newaxis], [batch_size, d])
+      x = array_ops.gather_nd(x, array_ops.stack([batch_indices, perm],
+                                                 axis=-1))
+      x = array_ops.reshape(x, shape)
+    else:
+      x = array_ops.gather(x, array_ops.invert_permutation(perm))
+
+    x.set_shape(lower_upper.shape)
+    return x
+
+
+def lu_reconstruct_assertions(lower_upper, perm, validate_args):
+  """Returns list of assertions related to `lu_reconstruct` assumptions."""
+  assertions = []
+
+  message = 'Input `lower_upper` must have at least 2 dimensions.'
+  if lower_upper.shape.rank is not None and lower_upper.shape.rank < 2:
+    raise ValueError(message)
+  elif validate_args:
+    assertions.append(
+        check_ops.assert_rank_at_least_v2(lower_upper, rank=2, message=message))
+
+  message = '`rank(lower_upper)` must equal `rank(perm) + 1`'
+  if lower_upper.shape.rank is not None and perm.shape.rank is not None:
+    if lower_upper.shape.rank != perm.shape.rank + 1:
+      raise ValueError(message)
+  elif validate_args:
+    assertions.append(
+        check_ops.assert_rank(
+            lower_upper, rank=array_ops.rank(perm) + 1, message=message))
+
+  message = '`lower_upper` must be square.'
+  if lower_upper.shape[:-2].is_fully_defined():
+    if lower_upper.shape[-2] != lower_upper.shape[-1]:
+      raise ValueError(message)
+  elif validate_args:
+    m, n = array_ops.split(
+        array_ops.shape(lower_upper)[-2:], num_or_size_splits=2)
+    assertions.append(check_ops.assert_equal(m, n, message=message))
+
+  return assertions
+
+
+def _lu_solve_assertions(lower_upper, perm, rhs, validate_args):
+  """Returns list of assertions related to `lu_solve` assumptions."""
+  assertions = lu_reconstruct_assertions(lower_upper, perm, validate_args)
+
+  message = 'Input `rhs` must have at least 2 dimensions.'
+  if rhs.shape.ndims is not None:
+    if rhs.shape.ndims < 2:
+      raise ValueError(message)
+  elif validate_args:
+    assertions.append(
+        check_ops.assert_rank_at_least(rhs, rank=2, message=message))
+
+  message = '`lower_upper.shape[-1]` must equal `rhs.shape[-1]`.'
+  if (lower_upper.shape[-1] is not None and rhs.shape[-2] is not None):
+    if lower_upper.shape[-1] != rhs.shape[-2]:
+      raise ValueError(message)
+  elif validate_args:
+    assertions.append(
+        check_ops.assert_equal(
+            array_ops.shape(lower_upper)[-1],
+            array_ops.shape(rhs)[-2],
+            message=message))
+
+  return assertions

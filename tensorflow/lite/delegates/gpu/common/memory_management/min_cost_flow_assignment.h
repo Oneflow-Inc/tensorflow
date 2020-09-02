@@ -18,7 +18,7 @@ limitations under the License.
 
 #include <vector>
 
-#include "tensorflow/lite/delegates/gpu/common/memory_management.h"
+#include "tensorflow/lite/delegates/gpu/common/memory_management/types.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 
 namespace tflite {
@@ -30,7 +30,7 @@ namespace gpu {
 // auxiliary flow graph, find minimum-cost flow in it and calculates the
 // assignment of shared objects to tensors, using the result of the flow
 // algorithm.
-Status MinCostFlowAssignment(
+absl::Status MinCostFlowAssignment(
     const std::vector<TensorUsageRecord<size_t>>& usage_records,
     ObjectsAssignment<size_t>* assignment);
 

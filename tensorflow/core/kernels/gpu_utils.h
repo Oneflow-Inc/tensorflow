@@ -30,9 +30,7 @@ limitations under the License.
 #include "tensorflow/core/platform/stream_executor.h"
 
 namespace stream_executor {
-namespace cuda {
 class RedzoneAllocator;
-}
 }  // namespace stream_executor
 
 namespace tensorflow {
@@ -52,13 +50,13 @@ bool RedzoneCheckDisabled();
 // Returns `buffer` if RedzoneCheckDisabled() is true.
 //
 // On error, return `buffer`, and log an error message (once).
-se::DeviceMemoryBase WrapRedzoneBestEffort(
-    se::cuda::RedzoneAllocator* rz_allocator, se::DeviceMemoryBase buffer);
+se::DeviceMemoryBase WrapRedzoneBestEffort(se::RedzoneAllocator* rz_allocator,
+                                           se::DeviceMemoryBase buffer);
 
 // Check the passed allocator for redzone violations.
 // If violations have occurred, mark the corresponding autotune result
 // as a failure.
-void CheckRedzones(const se::cuda::RedzoneAllocator& rz_allocator,
+void CheckRedzones(const se::RedzoneAllocator& rz_allocator,
                    tensorflow::AutotuneResult* autotune_result);
 
 template <typename T>
@@ -190,7 +188,7 @@ class AutoTuneMap {
     int32 count;
   };
   std::unordered_map<Parameters, ValueType, Hasher> params_config_map_
-      GUARDED_BY(mu_);
+      TF_GUARDED_BY(mu_);
   string name_;
   int32 min_score_threshold_;
   int32 max_autotune_count_;
@@ -240,7 +238,7 @@ void LogFusedConvForwardAutotuneResults(
     se::StreamExecutor* stream_exec, absl::Span<const AutotuneResult> results);
 
 // Returns the best algorithms for the config, one is the fastest, the other is
-// other is fastest with 0 scracth space. Unsuccessful autotuning results are
+// other is fastest with 0 scratch space. Unsuccessful autotuning results are
 // allowed and ignored.
 Status BestCudnnConvAlgorithm(absl::Span<const AutotuneResult> results,
                               se::dnn::AlgorithmConfig* algo);

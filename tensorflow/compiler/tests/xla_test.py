@@ -25,15 +25,16 @@ import re
 
 import numpy as np
 
-from tensorflow.python.eager import context
-from tensorflow.contrib.compiler import jit
-from tensorflow.core.protobuf import rewriter_config_pb2
 from tensorflow.core.framework import types_pb2
 from tensorflow.core.protobuf import config_pb2
+from tensorflow.core.protobuf import rewriter_config_pb2
 from tensorflow.python.client import session
+from tensorflow.python.compiler.xla import jit
+from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import random_seed
+from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import flags
@@ -82,6 +83,8 @@ class XLATestCase(test.TestCase):
 
   def __init__(self, method_name='runTest'):
     super(XLATestCase, self).__init__(method_name)
+    context.context().enable_mlir_bridge = test_util.is_mlir_bridge_enabled()
+
     self.device = FLAGS.test_device
     self.has_custom_call = (self.device == 'XLA_CPU')
     self._all_tf_types = set([

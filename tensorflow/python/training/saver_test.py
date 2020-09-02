@@ -18,7 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import functools
+import glob
 import math
 import os
 import random
@@ -34,9 +34,9 @@ from tensorflow.core.protobuf import meta_graph_pb2
 from tensorflow.core.protobuf import queue_runner_pb2
 from tensorflow.core.protobuf import rewriter_config_pb2
 from tensorflow.core.protobuf import saver_pb2
-from tensorflow.python import pywrap_tensorflow
 from tensorflow.python.client import session
 from tensorflow.python.data.ops import dataset_ops
+from tensorflow.python.data.ops import iterator_ops
 from tensorflow.python.eager import context
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
@@ -47,8 +47,6 @@ from tensorflow.python.framework import graph_io
 from tensorflow.python.framework import meta_graph
 from tensorflow.python.framework import ops as ops_lib
 from tensorflow.python.framework import test_util
-from tensorflow.python.keras.engine import training
-from tensorflow.python.keras.layers import core
 from tensorflow.python.lib.io import file_io
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
@@ -69,13 +67,11 @@ from tensorflow.python.summary import summary
 from tensorflow.python.training import adam
 from tensorflow.python.training import checkpoint_management
 from tensorflow.python.training import gradient_descent
+from tensorflow.python.training import py_checkpoint_reader
 from tensorflow.python.training import queue_runner_impl
 from tensorflow.python.training import saver as saver_module
 from tensorflow.python.training import saver_test_utils
-from tensorflow.python.training import training_util
 from tensorflow.python.training.tracking import base as trackable_base
-from tensorflow.python.training.tracking import tracking as trackable_tracking
-from tensorflow.python.training.tracking import util as trackable_utils
 from tensorflow.python.util import compat
 
 
@@ -1107,6 +1103,136 @@ class SaveRestoreShardedTest(test.TestCase):
 
 class SaveRestoreShardedTestV2(SaveRestoreShardedTest):
   _WRITE_VERSION = saver_pb2.SaverDef.V2
+
+  def testIterators(self):
+    save_path = os.path.join(self.get_temp_dir(), "sharded_iterators")
+
+    # Build a graph with 2 parameter nodes on different devices and save.
+    with session.Session(
+        target="",
+        config=config_pb2.ConfigProto(device_count={"CPU": 2})) as sess:
+      with sess.graph.device("/cpu:0"):
+        ds0 = dataset_ops.Dataset.range(10)
+        it0 = dataset_ops.make_initializable_iterator(ds0)
+        get_next0 = it0.get_next()
+      saveable0 = iterator_ops._IteratorSaveable(
+          it0._iterator_resource, name="saveable_it0")
+
+      with sess.graph.device("/cpu:1"):
+        ds1 = dataset_ops.Dataset.range(20)
+        it1 = dataset_ops.make_initializable_iterator(ds1)
+        get_next1 = it1.get_next()
+      saveable1 = iterator_ops._IteratorSaveable(
+          it1._iterator_resource, name="saveable_it1")
+      saver = saver_module.Saver({
+          "it0": saveable0,
+          "it1": saveable1
+      },
+                                 write_version=self._WRITE_VERSION,
+                                 sharded=True)
+      self.evaluate(it0.initializer)
+      self.evaluate(it1.initializer)
+      self.assertEqual(0, self.evaluate(get_next0))
+      self.assertEqual(1, self.evaluate(get_next0))
+      self.assertEqual(0, self.evaluate(get_next1))
+      val = saver.save(sess, save_path)
+      self.assertEqual(save_path, val)
+      data_files = glob.glob(save_path + ".data*")
+      self.assertEqual(2, len(data_files))
+
+    # Restore
+    with session.Session(
+        target="",
+        config=config_pb2.ConfigProto(device_count={"CPU": 2})) as sess:
+      with sess.graph.device("/cpu:0"):
+        ds0 = dataset_ops.Dataset.range(10)
+        it0 = dataset_ops.make_initializable_iterator(ds0)
+        get_next0 = it0.get_next()
+      saveable0 = iterator_ops._IteratorSaveable(
+          it0._iterator_resource, name="saveable_it0")
+
+      with sess.graph.device("/cpu:1"):
+        ds1 = dataset_ops.Dataset.range(20)
+        it1 = dataset_ops.make_initializable_iterator(ds1)
+        get_next1 = it1.get_next()
+      saveable1 = iterator_ops._IteratorSaveable(
+          it1._iterator_resource, name="saveable_it1")
+      saver = saver_module.Saver({
+          "it0": saveable0,
+          "it1": saveable1
+      },
+                                 write_version=self._WRITE_VERSION,
+                                 sharded=True)
+      self.evaluate(it0.initializer)
+      self.evaluate(it1.initializer)
+      saver.restore(sess, save_path)
+      self.assertEqual(2, self.evaluate(get_next0))
+      self.assertEqual(1, self.evaluate(get_next1))
+
+  def testIteratorsUnshardedRestore(self):
+    save_path = os.path.join(self.get_temp_dir(), "restore_unsharded_iterators")
+
+    # Build a graph with 2 parameter nodes on different devices and save.
+    with session.Session(
+        target="",
+        config=config_pb2.ConfigProto(device_count={"CPU": 2})) as sess:
+      with sess.graph.device("/cpu:0"):
+        ds0 = dataset_ops.Dataset.range(10)
+        it0 = dataset_ops.make_initializable_iterator(ds0)
+        get_next0 = it0.get_next()
+      saveable0 = iterator_ops._IteratorSaveable(
+          it0._iterator_resource, name="saveable_it0")
+
+      with sess.graph.device("/cpu:1"):
+        ds1 = dataset_ops.Dataset.range(20)
+        it1 = dataset_ops.make_initializable_iterator(ds1)
+        get_next1 = it1.get_next()
+      saveable1 = iterator_ops._IteratorSaveable(
+          it1._iterator_resource, name="saveable_it1")
+      saver = saver_module.Saver({
+          "it0": saveable0,
+          "it1": saveable1
+      },
+                                 write_version=self._WRITE_VERSION,
+                                 sharded=True)
+      self.evaluate(it0.initializer)
+      self.evaluate(it1.initializer)
+      self.assertEqual(0, self.evaluate(get_next0))
+      self.assertEqual(1, self.evaluate(get_next0))
+      self.assertEqual(0, self.evaluate(get_next1))
+      val = saver.save(sess, save_path)
+      self.assertEqual(save_path, val)
+      data_files = glob.glob(save_path + ".data*")
+      self.assertEqual(2, len(data_files))
+
+    # Restore
+    with session.Session(
+        target="",
+        config=config_pb2.ConfigProto(device_count={"CPU": 2})) as sess:
+      with sess.graph.device("/cpu:0"):
+        ds0 = dataset_ops.Dataset.range(10)
+        it0 = dataset_ops.make_initializable_iterator(ds0)
+        get_next0 = it0.get_next()
+      saveable0 = iterator_ops._IteratorSaveable(
+          it0._iterator_resource, name="saveable_it0")
+
+      with sess.graph.device("/cpu:1"):
+        ds1 = dataset_ops.Dataset.range(20)
+        it1 = dataset_ops.make_initializable_iterator(ds1)
+        get_next1 = it1.get_next()
+      saveable1 = iterator_ops._IteratorSaveable(
+          it1._iterator_resource, name="saveable_it1")
+      saver = saver_module.Saver({
+          "it0": saveable0,
+          "it1": saveable1
+      },
+                                 write_version=self._WRITE_VERSION,
+                                 sharded=False)
+      self.evaluate(it0.initializer)
+      self.evaluate(it1.initializer)
+      saver.restore(sess, save_path)
+      self.assertEqual(2, self.evaluate(get_next0))
+      self.assertEqual(1, self.evaluate(get_next1))
 
 
 class MaxToKeepTest(test.TestCase):
@@ -2468,7 +2594,7 @@ class CheckpointReaderTest(test.TestCase):
       save.save(sess, save_path)
 
       # Creates a reader.
-      reader = pywrap_tensorflow.NewCheckpointReader(save_path)
+      reader = py_checkpoint_reader.NewCheckpointReader(save_path)
       # Verifies that the tensors exist.
       self.assertTrue(reader.has_tensor("v0"))
       self.assertTrue(reader.has_tensor("v1"))
@@ -2493,7 +2619,7 @@ class CheckpointReaderTest(test.TestCase):
   def testNonexistentPath(self):
     with self.assertRaisesRegexp(errors.NotFoundError,
                                  "Unsuccessful TensorSliceReader"):
-      pywrap_tensorflow.NewCheckpointReader("non-existent")
+      py_checkpoint_reader.NewCheckpointReader("non-existent")
 
 
 class CheckpointReaderForV2Test(CheckpointReaderTest):
@@ -2733,7 +2859,7 @@ class ScopedGraphTest(test.TestCase):
       self.assertAllClose(expected, sess.run("hidden1/relu:0"))
       self.assertAllClose(expected, sess.run("hidden2/relu:0"))
 
-    # Verifies copy to differen graph.
+    # Verifies copy to different graph.
     graph2 = ops_lib.Graph()
     new_var_list_1 = meta_graph.copy_scoped_meta_graph(
         from_scope="hidden1",
@@ -2892,29 +3018,6 @@ class _OwnsMirroredVariables(trackable_base.Trackable):
     return self.non_dep_variable.name
 
 
-class NonLayerTrackable(trackable_tracking.AutoTrackable):
-
-  def __init__(self):
-    super(NonLayerTrackable, self).__init__()
-    self.a_variable = trackable_utils.add_variable(
-        self, name="a_variable", shape=[])
-
-
-class MyModel(training.Model):
-  """A concrete Model for testing."""
-
-  def __init__(self):
-    super(MyModel, self).__init__()
-    self._named_dense = core.Dense(1, use_bias=True)
-    self._second = core.Dense(1, use_bias=False)
-    # We can still track Trackables which aren't Layers.
-    self._non_layer = NonLayerTrackable()
-
-  def call(self, values):
-    ret = self._second(self._named_dense(values))
-    return ret
-
-
 class TrackableCompatibilityTests(test.TestCase):
 
   # TODO(allenl): Track down python3 reference cycles in these tests.
@@ -2980,46 +3083,6 @@ class TrackableCompatibilityTests(test.TestCase):
         saver.restore(sess, save_path)
         self.assertEqual(1, v.eval_count)
 
-  def _initialized_model(self):
-    input_value = constant_op.constant([[3.]])
-    model = MyModel()
-    optimizer = adam.AdamOptimizer(0.001)
-    optimizer_step = training_util.get_or_create_global_step()
-    root_trackable = trackable_utils.Checkpoint(
-        optimizer=optimizer, model=model, optimizer_step=optimizer_step)
-    train_op = optimizer.minimize(
-        functools.partial(model, input_value),
-        global_step=optimizer_step)
-    self.evaluate(trackable_utils.gather_initializers(
-        root_trackable))
-    self.evaluate(train_op)
-    # A regular variable, a slot variable, and a non-slot Optimizer variable
-    # with known values to check when loading.
-    self.evaluate(model._named_dense.bias.assign([1.]))
-    self.evaluate(optimizer.get_slot(
-        var=model._named_dense.bias, name="m").assign([2.]))
-    beta1_power, _ = optimizer._get_beta_accumulators()
-    self.evaluate(beta1_power.assign(3.))
-    return root_trackable
-
-  def _set_sentinels(self, root_trackable):
-    self.evaluate(root_trackable.model._named_dense.bias.assign([101.]))
-    self.evaluate(
-        root_trackable.optimizer.get_slot(
-            var=root_trackable.model._named_dense.bias, name="m")
-        .assign([102.]))
-    beta1_power, _ = root_trackable.optimizer._get_beta_accumulators()
-    self.evaluate(beta1_power.assign(103.))
-
-  def _check_sentinels(self, root_trackable):
-    self.assertAllEqual(
-        [1.], self.evaluate(root_trackable.model._named_dense.bias))
-    self.assertAllEqual([2.], self.evaluate(
-        root_trackable.optimizer.get_slot(
-            var=root_trackable.model._named_dense.bias, name="m")))
-    beta1_power, _ = root_trackable.optimizer._get_beta_accumulators()
-    self.assertAllEqual(3., self.evaluate(beta1_power))
-
   def testVariableNotFoundErrorRaised(self):
     # Restore does some tricky exception handling to figure out if it should
     # load an object-based checkpoint. Tests that the exception handling isn't
@@ -3066,58 +3129,6 @@ class TrackableCompatibilityTests(test.TestCase):
             errors.InvalidArgumentError,
             "a mismatch between the current graph and the graph"):
           a_saver.restore(sess=sess, save_path=save_path)
-
-  def testLoadFromObjectBasedGraph(self):
-    checkpoint_directory = self.get_temp_dir()
-    checkpoint_prefix = os.path.join(checkpoint_directory, "ckpt")
-
-    save_graph = ops_lib.Graph()
-    with save_graph.as_default(), self.session(graph=save_graph) as sess:
-      root = self._initialized_model()
-      object_saver = trackable_utils.Checkpoint(root=root)
-      save_path = object_saver.save(file_prefix=checkpoint_prefix)
-
-      # An incompatible object-based checkpoint to check error messages
-      var = resource_variable_ops.ResourceVariable(1., name="a")
-      self.evaluate(var.initializer)
-      second_saver = trackable_utils.Checkpoint(v=var)
-      second_path = second_saver.save(file_prefix=os.path.join(
-          checkpoint_directory, "second"))
-
-    restore_graph = ops_lib.Graph()
-    with restore_graph.as_default(), self.session(
-        graph=restore_graph) as sess:
-      root = self._initialized_model()
-      self._set_sentinels(root)
-      saver = saver_module.Saver()
-      saver.restore(sess=sess, save_path=save_path)
-      self._check_sentinels(root)
-      before_second_restore_ops = restore_graph.get_operations()
-      # Test that multiple restores do not pollute the graph
-      saver.restore(sess=sess, save_path=save_path)
-      self.assertEqual(before_second_restore_ops,
-                       restore_graph.get_operations())
-      with self.assertRaisesRegexp(errors.NotFoundError,
-                                   "Could not find some variables"):
-        saver.restore(sess=sess, save_path=second_path)
-
-  def testLoadFromObjectBasedEager(self):
-    checkpoint_directory = self.get_temp_dir()
-    checkpoint_prefix = os.path.join(checkpoint_directory, "ckpt")
-
-    save_graph = ops_lib.Graph()
-    with save_graph.as_default(), self.session(graph=save_graph):
-      root = self._initialized_model()
-      object_saver = trackable_utils.Checkpoint(root=root)
-      save_path = object_saver.save(file_prefix=checkpoint_prefix)
-
-    with context.eager_mode():
-      root = self._initialized_model()
-      self._set_sentinels(root)
-      saver = saver_module.Saver(
-          root.model.variables + root.optimizer.variables())
-      saver.restore(sess=None, save_path=save_path)
-      self._check_sentinels(root)
 
 
 if __name__ == "__main__":

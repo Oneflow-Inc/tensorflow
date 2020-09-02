@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import os
 import tempfile
+
 import numpy as np
 
 from tensorflow.lite.python import lite
@@ -55,6 +56,18 @@ class EvaluateFrozenGraph(test.TestCase):
     filename = self._saveFrozenGraph(sess)
     model_coverage.test_frozen_graph(filename, ['Placeholder'], ['add'])
 
+  def testInputWithRange(self):
+    with ops.Graph().as_default():
+      with session.Session().as_default() as sess:
+        in_tensor = array_ops.placeholder(
+            shape=[1, 16, 16, 3], dtype=dtypes.float32)
+        _ = in_tensor + in_tensor
+
+    filename = self._saveFrozenGraph(sess)
+    model_coverage.test_frozen_graph(
+        filename, ['Placeholder'], ['add'],
+        input_data_range={'Placeholder': (0, 10)})
+
   def testMultipleOutputs(self):
     with ops.Graph().as_default():
       with session.Session().as_default() as sess:
@@ -72,7 +85,6 @@ class EvaluateFrozenGraph(test.TestCase):
     model_coverage.test_frozen_graph(filename, ['inputA', 'inputB'],
                                      ['add', 'Mean'])
 
-  @test_util.run_in_graph_and_eager_modes
   def testFunctions(self):
     """Tests functions."""
 
@@ -167,18 +179,21 @@ class EvaluateKerasModel(test.TestCase):
       os.close(fd)
     return keras_file
 
+  @test_util.run_v1_only('Keras test fails under v2, see b/157266669')
   def testFloat(self):
     model = self._getSingleInputKerasModel()
     keras_file = self._saveKerasModel(model)
 
     model_coverage.test_keras_model(keras_file)
 
+  @test_util.run_v1_only('Keras test fails under v2, see b/157266669')
   def testPostTrainingQuantize(self):
     model = self._getSingleInputKerasModel()
     keras_file = self._saveKerasModel(model)
 
     model_coverage.test_keras_model(keras_file, post_training_quantize=True)
 
+  @test_util.run_v1_only('Keras test fails under v2, see b/157266669')
   def testTargetOps(self):
     model = self._getSingleInputKerasModel()
     keras_file = self._saveKerasModel(model)

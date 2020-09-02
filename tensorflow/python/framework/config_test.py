@@ -33,6 +33,7 @@ from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_ops
 from tensorflow.python.framework import test_util
+from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.platform import test
 from tensorflow.python.util import compat
@@ -158,7 +159,6 @@ class ConfigTest(test.TestCase, parameterized.TestCase):
     else:
       self.assertFalse(config.get_soft_device_placement())
 
-    @def_function.function
     def mod():
       with ops.device('/device:GPU:0'):
         a = constant_op.constant(1.0)
@@ -171,8 +171,10 @@ class ConfigTest(test.TestCase, parameterized.TestCase):
         config.get_soft_device_placement(),
         context.context().soft_device_placement)
 
-    # Since soft placement is enabled, the mod operation should work with CPU
+    # Since soft placement is enabled, the mod operation should fallback to CPU
+    # with pure eager execution as well as functions
     mod()
+    def_function.function(mod)()
 
     config.set_soft_device_placement(False)
     self.assertEqual(config.get_soft_device_placement(), False)
@@ -181,8 +183,11 @@ class ConfigTest(test.TestCase, parameterized.TestCase):
         context.context().soft_device_placement)
 
     # Since soft placement is disabled, the mod operation should fail on GPU
+    # with pure eager execution as well as functions
     with self.assertRaises(errors.InvalidArgumentError):
       mod()
+    with self.assertRaises(errors.InvalidArgumentError):
+      def_function.function(mod)()
 
   @reset_eager
   def testLogDevicePlacement(self):
@@ -202,12 +207,37 @@ class ConfigTest(test.TestCase, parameterized.TestCase):
 
     context.ensure_initialized()
 
-    with self.assertRaises(RuntimeError):
-      context.set_log_device_placement(True)
+    # Changing the device placement should not throw an exception
+    context.set_log_device_placement(True)
 
-    # If the setting the device placement is a no-op, do not throw a runtime
-    # exception.
-    context.set_log_device_placement(False)
+  @reset_eager
+  def testEnableMlirBridge(self):
+    # Default value of enable_mlir_bridge is false.
+    self.assertFalse(context.context().config.experimental.enable_mlir_bridge)
+
+    # Tests enabling mlir bridge.
+    config.enable_mlir_bridge()
+    self.assertTrue(context.context().config.experimental.enable_mlir_bridge)
+
+    # Tests disabling mlir bridge.
+    config.disable_mlir_bridge()
+    self.assertFalse(context.context().config.experimental.enable_mlir_bridge)
+
+  @reset_eager
+  def testEnableMlirGraphOptimization(self):
+    # Default value of enable_mlir_graph_optimization is false.
+    self.assertFalse(
+        context.context().config.experimental.enable_mlir_graph_optimization)
+
+    # Tests enabling mlir graph optimization.
+    config.enable_mlir_graph_optimization()
+    self.assertTrue(
+        context.context().config.experimental.enable_mlir_graph_optimization)
+
+    # Tests disabling mlir graph optimization.
+    config.disable_mlir_graph_optimization()
+    self.assertFalse(
+        context.context().config.experimental.enable_mlir_graph_optimization)
 
   @test_util.run_gpu_only
   @reset_eager
@@ -351,9 +381,9 @@ class DeviceTest(test.TestCase):
     cpus = config.list_physical_devices('CPU')
     self.assertEqual(len(cpus), 1)
 
-    config.set_virtual_device_configuration(cpus[0], [
-        context.VirtualDeviceConfiguration(),
-        context.VirtualDeviceConfiguration()
+    config.set_logical_device_configuration(cpus[0], [
+        context.LogicalDeviceConfiguration(),
+        context.LogicalDeviceConfiguration()
     ])
 
     context.ensure_initialized()
@@ -367,10 +397,10 @@ class DeviceTest(test.TestCase):
     with ops.device('/device:CPU:1'):
       b = constant_op.constant(1.0)
       self.evaluate(b)
-    with self.assertRaisesRegexp(RuntimeError, 'unknown device'):
-      with ops.device('/device:CPU:2'):
-        c = constant_op.constant(1.0)
-        self.evaluate(c)
+    with ops.device('/device:CPU:2'):
+      c = constant_op.constant(1.0)
+      self.evaluate(c)
+    self.assertIn('CPU:0', c.device)
 
     # Ensure we can place ops on each of the device names
     for vcpu in vcpus:
@@ -380,21 +410,22 @@ class DeviceTest(test.TestCase):
 
     # Modifying the CPU configuration is not supported
     with self.assertRaisesRegexp(RuntimeError, 'cannot be modified'):
-      config.set_virtual_device_configuration(cpus[0], [
-          context.VirtualDeviceConfiguration(),
-          context.VirtualDeviceConfiguration(),
-          context.VirtualDeviceConfiguration()
+      config.set_logical_device_configuration(cpus[0], [
+          context.LogicalDeviceConfiguration(),
+          context.LogicalDeviceConfiguration(),
+          context.LogicalDeviceConfiguration()
       ])
 
     # Setting the same CPU configuration is fine
-    config.set_virtual_device_configuration(cpus[0], [
-        context.VirtualDeviceConfiguration(),
-        context.VirtualDeviceConfiguration()
+    config.set_logical_device_configuration(cpus[0], [
+        context.LogicalDeviceConfiguration(),
+        context.LogicalDeviceConfiguration()
     ])
 
   @test_util.run_gpu_only
   @reset_eager
   def testGpuNone(self):
+    config.set_soft_device_placement(False)
     gpus = config.list_physical_devices('GPU')
     self.assertGreater(len(gpus), 0)
 
@@ -403,13 +434,27 @@ class DeviceTest(test.TestCase):
 
     self.assertEqual(len(config.get_visible_devices('CPU')), 1)
     self.assertGreater(len(config.get_visible_devices('GPU')), 0)
+
+    # get_visible_devices filters out XLA_* devices.  list_logical_devices does
+    # not, but we can't call it here because it initializes the devices and
+    # calling set_visible_devices after that is disallowed.
+    self.assertEqual(len(config.get_visible_devices('XLA_GPU')), 0)
+
     config.set_visible_devices(cpus[0])
     self.assertEqual(len(config.get_visible_devices('CPU')), 1)
     self.assertEqual(len(config.get_visible_devices('GPU')), 0)
+    self.assertEqual(len(config.list_logical_devices('XLA_GPU')), 0)
 
-    with self.assertRaisesRegexp(RuntimeError, 'unknown device'):
+    with self.assertRaisesRegexp(errors.InvalidArgumentError,
+                                 'Could not satisfy'):
       with ops.device('/device:GPU:0'):
-        a = constant_op.constant(1.0)
+        a = array_ops.identity(1.0)
+        self.evaluate(a)
+
+    with self.assertRaisesRegexp(errors.InvalidArgumentError,
+                                 'Could not satisfy'):
+      with ops.device('/device:XLA_GPU:0'):
+        a = array_ops.identity(1.0)
         self.evaluate(a)
 
     # Modifying the visible devices is not supported
@@ -437,49 +482,94 @@ class DeviceTest(test.TestCase):
         a = constant_op.constant(1.0)
         self.evaluate(a)
 
+  @reset_eager
+  def testDeviceDetails(self):
+    (cpu,) = config.list_physical_devices('CPU')
+    details = config.get_device_details(cpu)
+    self.assertEqual(details, {})
+
+    if not test_util.is_gpu_available():
+      return
+
+    gpus = config.list_physical_devices('GPU')
+    details = config.get_device_details(gpus[0])
+    self.assertIsInstance(details['device_name'], str)
+    self.assertNotEmpty(details['device_name'])
+    if test.is_built_with_rocm():
+      # AMD GPUs do not have a compute capability
+      self.assertNotIn('compute_capability', details)
+    else:
+      cc = details['compute_capability']
+      self.assertIsInstance(cc, tuple)
+      major, minor = cc
+      self.assertGreater(major, 0)
+      self.assertGreaterEqual(minor, 0)
+
+    # Test GPU returned from get_visible_devices
+    if len(gpus) > 2:
+      config.set_visible_devices(gpus[1], 'GPU')
+      (visible_gpu,) = config.get_visible_devices('GPU')
+      details = config.get_device_details(visible_gpu)
+      self.assertIsInstance(details['device_name'], str)
+
+  @reset_eager
+  def testDeviceDetailsErrors(self):
+    logical_devices = config.list_logical_devices()
+    with self.assertRaisesRegexp(ValueError,
+                                 'must be a tf.config.PhysicalDevice'):
+      config.get_device_details(logical_devices[0])
+
+    phys_dev = context.PhysicalDevice('/physical_device:CPU:100', 'CPU')
+    with self.assertRaisesRegexp(
+        ValueError, 'The PhysicalDevice must be one obtained from '
+        'calling `tf.config.list_physical_devices`'):
+      config.get_device_details(phys_dev)
+
   @test_util.run_gpu_only
   @reset_eager
   def testVirtualGpu(self):
+    config.set_soft_device_placement(False)
     gpus = config.list_physical_devices('GPU')
     self.assertNotEqual(len(gpus), 0)
 
-    self.assertIsNone(config.get_virtual_device_configuration(gpus[-1]))
-    config.set_virtual_device_configuration(gpus[-1], [
-        context.VirtualDeviceConfiguration(memory_limit=10),
-        context.VirtualDeviceConfiguration(memory_limit=10)
+    self.assertIsNone(config.get_logical_device_configuration(gpus[-1]))
+    config.set_logical_device_configuration(gpus[-1], [
+        context.LogicalDeviceConfiguration(memory_limit=10),
+        context.LogicalDeviceConfiguration(memory_limit=10)
     ])
-    self.assertEqual(len(config.get_virtual_device_configuration(gpus[-1])), 2)
+    self.assertEqual(len(config.get_logical_device_configuration(gpus[-1])), 2)
 
     logical_gpus = config.list_logical_devices('GPU')
     self.assertTrue(len(logical_gpus), len(gpus) + 1)
     for i in range(0, len(logical_gpus)):
       with ops.device('/device:GPU:' + str(i)):
-        a = constant_op.constant(1.0)
+        a = array_ops.identity(1.0)
         self.evaluate(a)
 
-    with self.assertRaisesRegexp(RuntimeError, 'unknown device'):
+    with self.assertRaisesRegexp(errors.InvalidArgumentError,
+                                 'Could not satisfy'):
       with ops.device('/device:GPU:' + str(len(logical_gpus))):
-        a = constant_op.constant(1.0)
+        a = array_ops.identity(1.0)
         self.evaluate(a)
 
     # Modifying the GPU configuration is not supported
     with self.assertRaisesRegexp(RuntimeError, 'cannot be modified'):
-      config.set_virtual_device_configuration(gpus[-1], [
-          context.VirtualDeviceConfiguration(memory_limit=20),
-          context.VirtualDeviceConfiguration(memory_limit=20)
+      config.set_logical_device_configuration(gpus[-1], [
+          context.LogicalDeviceConfiguration(memory_limit=20),
+          context.LogicalDeviceConfiguration(memory_limit=20)
       ])
 
     with self.assertRaisesRegexp(RuntimeError, 'cannot be modified'):
-      config.set_virtual_device_configuration(gpus[-1], [
-          context.VirtualDeviceConfiguration(memory_limit=10),
-          context.VirtualDeviceConfiguration(memory_limit=10),
-          context.VirtualDeviceConfiguration(memory_limit=10)
+      config.set_logical_device_configuration(gpus[-1], [
+          context.LogicalDeviceConfiguration(memory_limit=10),
+          context.LogicalDeviceConfiguration(memory_limit=10),
+          context.LogicalDeviceConfiguration(memory_limit=10)
       ])
 
     # Setting the same GPU configuration is fine
-    config.set_virtual_device_configuration(gpus[-1], [
-        context.VirtualDeviceConfiguration(memory_limit=10),
-        context.VirtualDeviceConfiguration(memory_limit=10)
+    config.set_logical_device_configuration(gpus[-1], [
+        context.LogicalDeviceConfiguration(memory_limit=10),
+        context.LogicalDeviceConfiguration(memory_limit=10)
     ])
 
   @test_util.run_gpu_only
@@ -541,15 +631,15 @@ class DeviceTest(test.TestCase):
     self.assertTrue(c.gpu_options.allow_growth)
 
     with self.assertRaisesRegexp(ValueError, 'memory limit'):
-      config.set_virtual_device_configuration(gpus[-1], [
-          context.VirtualDeviceConfiguration(),
-          context.VirtualDeviceConfiguration()
+      config.set_logical_device_configuration(gpus[-1], [
+          context.LogicalDeviceConfiguration(),
+          context.LogicalDeviceConfiguration()
       ])
 
-    self.assertIsNone(config.get_virtual_device_configuration(gpus[-1]))
-    config.set_virtual_device_configuration(gpus[-1], [
-        context.VirtualDeviceConfiguration(memory_limit=10),
-        context.VirtualDeviceConfiguration(memory_limit=10)
+    self.assertIsNone(config.get_logical_device_configuration(gpus[-1]))
+    config.set_logical_device_configuration(gpus[-1], [
+        context.LogicalDeviceConfiguration(memory_limit=10),
+        context.LogicalDeviceConfiguration(memory_limit=10)
     ])
 
     c = context.context().config
@@ -589,7 +679,7 @@ class DeviceTest(test.TestCase):
       self.assertIsNotNone(gpu.name)
 
   @reset_eager
-  def testV1CompatibilityDummyInivisibleDeviceList(self):
+  def testV1CompatibilityDummyInvisibleDeviceList(self):
     gpus = config.list_physical_devices('GPU')
     if gpus:
       self.skipTest('Test requires no GPUs')

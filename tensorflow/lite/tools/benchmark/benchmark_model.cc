@@ -18,9 +18,10 @@ limitations under the License.
 #include <iostream>
 #include <sstream>
 
+#include "tensorflow/lite/profiling/memory_info.h"
 #include "tensorflow/lite/profiling/time.h"
 #include "tensorflow/lite/tools/benchmark/benchmark_utils.h"
-#include "tensorflow/lite/tools/benchmark/logging.h"
+#include "tensorflow/lite/tools/logging.h"
 
 namespace tflite {
 namespace benchmark {
@@ -33,6 +34,7 @@ BenchmarkParams BenchmarkModel::DefaultParams() {
   params.AddParam("max_secs", BenchmarkParam::Create<float>(150.0f));
   params.AddParam("run_delay", BenchmarkParam::Create<float>(-1.0f));
   params.AddParam("num_threads", BenchmarkParam::Create<int32_t>(1));
+  params.AddParam("use_caching", BenchmarkParam::Create<bool>(false));
   params.AddParam("benchmark_name", BenchmarkParam::Create<std::string>(""));
   params.AddParam("output_prefix", BenchmarkParam::Create<std::string>(""));
   params.AddParam("warmup_runs", BenchmarkParam::Create<int32_t>(1));
@@ -46,10 +48,22 @@ void BenchmarkLoggingListener::OnBenchmarkEnd(const BenchmarkResults& results) {
   auto inference_us = results.inference_time_us();
   auto init_us = results.startup_latency_us();
   auto warmup_us = results.warmup_time_us();
-  TFLITE_LOG(INFO) << "Average inference timings in us: "
-                   << "Warmup: " << warmup_us.avg() << ", "
+  auto init_mem_usage = results.init_mem_usage();
+  auto overall_mem_usage = results.overall_mem_usage();
+  TFLITE_LOG(INFO) << "Inference timings in us: "
                    << "Init: " << init_us << ", "
-                   << "no stats: " << inference_us.avg();
+                   << "First inference: " << warmup_us.first() << ", "
+                   << "Warmup (avg): " << warmup_us.avg() << ", "
+                   << "Inference (avg): " << inference_us.avg();
+
+  if (!init_mem_usage.IsSupported()) return;
+  TFLITE_LOG(INFO)
+      << "Note: as the benchmark tool itself affects memory footprint, the "
+         "following is only APPROXIMATE to the actual memory footprint of the "
+         "model at runtime. Take the information at your discretion.";
+  TFLITE_LOG(INFO) << "Peak memory footprint (MB): init="
+                   << init_mem_usage.max_rss_kb / 1024.0
+                   << " overall=" << overall_mem_usage.max_rss_kb / 1024.0;
 }
 
 std::vector<Flag> BenchmarkModel::GetFlags() {
@@ -69,6 +83,11 @@ std::vector<Flag> BenchmarkModel::GetFlags() {
           "the end of the run but will not start the next run."),
       CreateFlag<float>("run_delay", &params_, "delay between runs in seconds"),
       CreateFlag<int32_t>("num_threads", &params_, "number of threads"),
+      CreateFlag<bool>(
+          "use_caching", &params_,
+          "Enable caching of prepacked weights matrices in matrix "
+          "multiplication routines. Currently implies the use of the Ruy "
+          "library."),
       CreateFlag<std::string>("benchmark_name", &params_, "benchmark name"),
       CreateFlag<std::string>("output_prefix", &params_,
                               "benchmark output prefix"),
@@ -94,6 +113,8 @@ void BenchmarkModel::LogParams() {
   TFLITE_LOG(INFO) << "Inter-run delay (seconds): ["
                    << params_.Get<float>("run_delay") << "]";
   TFLITE_LOG(INFO) << "Num threads: [" << params_.Get<int32_t>("num_threads")
+                   << "]";
+  TFLITE_LOG(INFO) << "Use caching: [" << params_.Get<bool>("use_caching")
                    << "]";
   TFLITE_LOG(INFO) << "Benchmark name: ["
                    << params_.Get<std::string>("benchmark_name") << "]";
@@ -155,27 +176,28 @@ TfLiteStatus BenchmarkModel::Run(int argc, char** argv) {
 }
 
 TfLiteStatus BenchmarkModel::Run() {
-  TfLiteStatus validation_status = ValidateParams();
-  if (validation_status != kTfLiteOk) {
-    return validation_status;
-  }
+  TF_LITE_ENSURE_STATUS(ValidateParams());
 
   LogParams();
 
+  const double model_size_mb = MayGetModelFileSize() / 1e6;
+  const auto start_mem_usage = profiling::memory::GetMemoryUsage();
   int64_t initialization_start_us = profiling::time::NowMicros();
-  TfLiteStatus init_status = Init();
-  if (init_status != kTfLiteOk) {
-    return init_status;
-  }
+  TF_LITE_ENSURE_STATUS(Init());
+  const auto init_end_mem_usage = profiling::memory::GetMemoryUsage();
   int64_t initialization_end_us = profiling::time::NowMicros();
   int64_t startup_latency_us = initialization_end_us - initialization_start_us;
-  TFLITE_LOG(INFO) << "Initialized session in " << startup_latency_us / 1e3
-                   << "ms";
+  const auto init_mem_usage = init_end_mem_usage - start_mem_usage;
 
-  TfLiteStatus status = PrepareInputData();
-  if (status != kTfLiteOk) {
-    return status;
+  if (model_size_mb > 0) {
+    TFLITE_LOG(INFO) << "The input model file size (MB): " << model_size_mb;
   }
+  TFLITE_LOG(INFO) << "Initialized session in " << startup_latency_us / 1e3
+                   << "ms.";
+
+  TF_LITE_ENSURE_STATUS(PrepareInputData());
+
+  TfLiteStatus status = kTfLiteOk;
   uint64_t input_bytes = ComputeInputBytes();
   listeners_.OnBenchmarkStart(params_);
   Stat<int64_t> warmup_time_us =
@@ -189,9 +211,12 @@ TfLiteStatus BenchmarkModel::Run() {
   Stat<int64_t> inference_time_us =
       Run(params_.Get<int32_t>("num_runs"), params_.Get<float>("min_secs"),
           params_.Get<float>("max_secs"), REGULAR, &status);
-  listeners_.OnBenchmarkEnd(
-      {startup_latency_us, input_bytes, warmup_time_us, inference_time_us});
+  const auto overall_mem_usage =
+      profiling::memory::GetMemoryUsage() - start_mem_usage;
 
+  listeners_.OnBenchmarkEnd({model_size_mb, startup_latency_us, input_bytes,
+                             warmup_time_us, inference_time_us, init_mem_usage,
+                             overall_mem_usage});
   return status;
 }
 
@@ -204,6 +229,13 @@ TfLiteStatus BenchmarkModel::ParseFlags(int* argc, char** argv) {
     TFLITE_LOG(ERROR) << usage;
     return kTfLiteError;
   }
+
+  std::string unconsumed_args =
+      Flags::ArgsToString(*argc, const_cast<const char**>(argv));
+  if (!unconsumed_args.empty()) {
+    TFLITE_LOG(WARN) << "Unconsumed cmdline flags: " << unconsumed_args;
+  }
+
   return kTfLiteOk;
 }
 

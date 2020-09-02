@@ -30,10 +30,11 @@ namespace cl {
 class Pooling : public GPUOperation {
  public:
   Pooling(const OperationDef& definition, const Pooling2DAttributes& attr);
-  Status AddToQueue(CLCommandQueue* queue) override;
-  Status Tune(const TuningParameters& params) override;
+  Pooling(const OperationDef& definition, const Pooling3DAttributes& attr);
+  absl::Status AddToQueue(CLCommandQueue* queue) override;
+  absl::Status Tune(const TuningParameters& params) override;
 
-  Status Compile(const CreationContext& creation_context) override;
+  absl::Status Compile(const CreationContext& creation_context) override;
 
   // Move only
   Pooling(Pooling&& kernel);
@@ -42,12 +43,12 @@ class Pooling : public GPUOperation {
   Pooling& operator=(const Pooling&) = delete;
 
  private:
-  Status BindArguments();
+  absl::Status BindArguments();
   int3 GetGridSize() const;
 
-  int2 stride_;
-  int2 padding_;
-  int2 kernel_size_;
+  int4 stride_;
+  int4 padding_;
+  int4 kernel_size_;
 
   PoolingType type_;
   bool output_indices_;
@@ -58,6 +59,9 @@ class Pooling : public GPUOperation {
 
 Pooling CreatePooling(const OperationDef& definition,
                       const Pooling2DAttributes& attr);
+
+Pooling CreatePooling(const OperationDef& definition,
+                      const Pooling3DAttributes& attr);
 
 }  // namespace cl
 }  // namespace gpu

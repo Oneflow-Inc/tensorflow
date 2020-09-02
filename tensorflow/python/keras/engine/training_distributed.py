@@ -21,7 +21,6 @@ from __future__ import print_function
 
 import numpy as np
 
-from tensorflow.python.data.experimental.ops import batching
 from tensorflow.python.distribute import distribute_coordinator as dc
 from tensorflow.python.distribute import distribution_strategy_context
 from tensorflow.python.distribute import input_lib
@@ -81,7 +80,7 @@ def _make_train_step_fn(model, mode, strategy, output_labels):
     # When input feature is a dictionary of tensors, dictionary is flattended
     # to an array and passed as a model input. This results in input mismatch
     # when model input layer names are not sorted in alphabetical order as
-    # `nest.flatten()`sorts dictioary elements by keys. As so, transform input
+    # `nest.flatten()`sorts dictionary elements by keys. As so, transform input
     # tensors into an array and order it along `model._feed_input_names`.
     if isinstance(inputs, dict):
       inputs = [inputs[input_name] for input_name in model._feed_input_names]
@@ -281,6 +280,7 @@ def experimental_tpu_fit_loop(model,
     callbacks.on_epoch_end(epoch, epoch_logs)
     if callbacks.model.stop_training:
       break
+  model._successful_loop_finish = True
   callbacks._call_end_hook(mode)
 
   if model._compile_distribution:
@@ -338,7 +338,7 @@ def experimental_tpu_test_loop(model,
       return [array_ops.identity(out) for out in outputs]
 
   test_input_data = iterator.get_next()
-  per_replica_outputs = current_strategy.experimental_run_v2(
+  per_replica_outputs = current_strategy.run(
       _test_step_fn, args=(test_input_data,))
   output_tensors = {}
   for label, output in zip(out_labels, per_replica_outputs):
@@ -456,7 +456,7 @@ def experimental_tpu_predict_loop(model,
                                                   padding_handler.update_mask)
 
     dataset = dataset.map(padding_handler.pad_batch)
-    dataset = dataset.apply(batching.unbatch())
+    dataset = dataset.unbatch()
     # Upon this point, it is guaranteed that the dataset does not
     # have partial batches. Thus, we set `drop_remainder=True` to
     # get static shape information about the elements in the dataset.
@@ -488,7 +488,7 @@ def experimental_tpu_predict_loop(model,
   # use numpy arrays directly to avoid cumulating unnecessary input pipeline
   # ops.
   predict_input_data = iterator.get_next()
-  per_replica_outputs = current_strategy.experimental_run_v2(
+  per_replica_outputs = current_strategy.run(
       _predict_step_fn, args=(predict_input_data,))
   output_tensors = dist_utils.flatten_per_replica_values(
       current_strategy, per_replica_outputs)
@@ -601,8 +601,12 @@ class DistributionSingleWorkerTrainingLoop(training_utils.TrainingLoop):
     dist_utils.validate_inputs(x, y)
 
     batch_size, steps_per_epoch = dist_utils.process_batch_and_step_size(
-        model._distribution_strategy, x, batch_size, steps_per_epoch,
-        ModeKeys.TRAIN)
+        model._distribution_strategy,
+        x,
+        batch_size,
+        steps_per_epoch,
+        ModeKeys.TRAIN,
+        validation_split=validation_split)
     batch_size = model._validate_or_infer_batch_size(
         batch_size, steps_per_epoch, x)
     dataset = model._distribution_standardize_user_data(
@@ -756,7 +760,7 @@ class DistributionSingleWorkerTrainingLoop(training_utils.TrainingLoop):
         callbacks=callbacks)
 
 
-def train_with_multi_worker(method):
+def _train_with_multi_worker(method):
   """Decorator that handles multi worker training with distribution strategy."""
 
   def wrapper(model, **kwargs):
@@ -782,11 +786,11 @@ class DistributionMultiWorkerTrainingLoop(training_utils.TrainingLoop):
     self._single_worker_loop = single_worker_loop
 
   def fit(self, *args, **kwargs):
-    return train_with_multi_worker(self._single_worker_loop.fit)(
+    return _train_with_multi_worker(self._single_worker_loop.fit)(
         *args, **kwargs)
 
   def evaluate(self, *args, **kwargs):
-    return train_with_multi_worker(self._single_worker_loop.evaluate)(
+    return _train_with_multi_worker(self._single_worker_loop.evaluate)(
         *args, **kwargs)
 
   def predict(self, *args, **kwargs):

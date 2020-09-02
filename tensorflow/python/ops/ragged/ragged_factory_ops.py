@@ -27,6 +27,7 @@ from tensorflow.python.framework import tensor_shape
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops.ragged import ragged_tensor
 from tensorflow.python.ops.ragged import ragged_tensor_value
+from tensorflow.python.util import dispatch
 from tensorflow.python.util.tf_export import tf_export
 
 
@@ -34,16 +35,15 @@ from tensorflow.python.util.tf_export import tf_export
 # Op to construct a constant RaggedTensor from a nested Python list.
 #===============================================================================
 @tf_export("ragged.constant")
+@dispatch.add_dispatch_support
 def constant(pylist, dtype=None, ragged_rank=None, inner_shape=None,
              name=None, row_splits_dtype=dtypes.int64):
   """Constructs a constant RaggedTensor from a nested Python list.
 
   Example:
 
-  ```python
-  >>> ragged.constant([[1, 2], [3], [4, 5, 6]]).eval()
-  RaggedTensorValue(values=[1, 2, 3, 4, 5, 6], splits=[0, 2, 3, 6])
-  ```
+  >>> tf.ragged.constant([[1, 2], [3], [4, 5, 6]])
+  <tf.RaggedTensor [[1, 2], [3], [4, 5, 6]]>
 
   All scalar values in `pylist` must have the same nesting depth `K`, and the
   returned `RaggedTensor` will have rank `K`.  If `pylist` contains no scalar
@@ -59,8 +59,8 @@ def constant(pylist, dtype=None, ragged_rank=None, inner_shape=None,
       `pylist`.
     ragged_rank: An integer specifying the ragged rank of the returned
       `RaggedTensor`.  Must be nonnegative and less than `K`. Defaults to
-      `max(0, K - 1)` if `inner_shape` is not specified.  Defaults to `max(0, K
-      - 1 - len(inner_shape))` if `inner_shape` is specified.
+      `max(0, K - 1)` if `inner_shape` is not specified.  Defaults to
+      `max(0, K - 1 - len(inner_shape))` if `inner_shape` is specified.
     inner_shape: A tuple of integers specifying the shape for individual inner
       values in the returned `RaggedTensor`.  Defaults to `()` if `ragged_rank`
       is not specified.  If `ragged_rank` is specified, then a default is chosen
@@ -88,6 +88,7 @@ def constant(pylist, dtype=None, ragged_rank=None, inner_shape=None,
 
 
 @tf_export(v1=["ragged.constant_value"])
+@dispatch.add_dispatch_support
 def constant_value(pylist, dtype=None, ragged_rank=None, inner_shape=None,
                    row_splits_dtype="int64"):
   """Constructs a RaggedTensorValue from a nested Python list.
@@ -98,10 +99,9 @@ def constant_value(pylist, dtype=None, ragged_rank=None, inner_shape=None,
 
   Example:
 
-  ```python
-  >>> ragged.constant_value([[1, 2], [3], [4, 5, 6]])
-  RaggedTensorValue(values=[1, 2, 3, 4, 5, 6], splits=[0, 2, 3, 6])
-  ```
+  >>> tf.compat.v1.ragged.constant_value([[1, 2], [3], [4, 5, 6]])
+  tf.RaggedTensorValue(values=array([1, 2, 3, 4, 5, 6]),
+                       row_splits=array([0, 2, 3, 6]))
 
   All scalar values in `pylist` must have the same nesting depth `K`, and the
   returned `RaggedTensorValue` will have rank `K`.  If `pylist` contains no
@@ -314,6 +314,7 @@ def _default_inner_shape_for_pylist(pylist, ragged_rank):
 
 
 @tf_export(v1=["ragged.placeholder"])
+@dispatch.add_dispatch_support
 def placeholder(dtype, ragged_rank, value_shape=None, name=None):
   """Creates a placeholder for a `tf.RaggedTensor` that will always be fed.
 
@@ -345,5 +346,5 @@ def placeholder(dtype, ragged_rank, value_shape=None, name=None):
     for i in reversed(range(ragged_rank)):
       row_splits = array_ops.placeholder(dtypes.int64, [None],
                                          "row_splits_%d" % i)
-      result = ragged_tensor.RaggedTensor(result, row_splits, internal=True)
+      result = ragged_tensor.RaggedTensor.from_row_splits(result, row_splits)
     return result

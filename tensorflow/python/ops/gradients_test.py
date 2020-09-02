@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 import sys
 import warnings
+
 from absl.testing import parameterized
 import numpy as np
 from tensorflow.python.client import session
@@ -32,7 +33,6 @@ from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.framework.constant_op import constant
-from tensorflow.python.keras.engine import training
 from tensorflow.python.layers import core as core_layers
 from tensorflow.python.ops import array_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import array_ops
@@ -59,6 +59,8 @@ from tensorflow.python.ops import variable_scope
 from tensorflow.python.ops import variables
 from tensorflow.python.ops.nn_ops import bias_add
 from tensorflow.python.platform import googletest
+from tensorflow.python.ops import gradient_checker_v2
+from tensorflow.python.util import nest
 
 
 class GradientsTest(test_util.TensorFlowTestCase, parameterized.TestCase):
@@ -227,9 +229,29 @@ class GradientsTest(test_util.TensorFlowTestCase, parameterized.TestCase):
       z = x * 2.0
       w = z * 3.0
       grads = gradients.gradients(z, [c])
-      self.assertTrue(isinstance(grads[0], ops.Tensor))
+      self.assertIsInstance(grads[0], ops.Tensor)
       grads = gradients.gradients(w, [c])
-      self.assertTrue(isinstance(grads[0], ops.Tensor))
+      self.assertIsInstance(grads[0], ops.Tensor)
+
+  def testNoGradientForStringOutputsWithOpNamespace(self):
+    with ops.Graph().as_default():
+
+      def _TestOpGrad(_, float_grad, string_grad):
+        """Gradient function for TestStringOutput."""
+        self.assertEqual(float_grad.dtype, dtypes.float32)
+        self.assertFalse(string_grad)
+        return float_grad
+
+      ops.RegisterGradient("Namespace>TestStringOutput")(_TestOpGrad)
+
+      c = constant(1.0)
+      x, _ = test_ops.namespace_test_string_output(c)
+      z = x * 2.0
+      w = z * 3.0
+      grads = gradients.gradients(z, [c])
+      self.assertIsInstance(grads[0], ops.Tensor)
+      grads = gradients.gradients(w, [c])
+      self.assertIsInstance(grads[0], ops.Tensor)
 
   def testSingletonIndexedSlices(self):
     with ops.Graph().as_default():
@@ -408,6 +430,63 @@ class GradientsTest(test_util.TensorFlowTestCase, parameterized.TestCase):
       with self.assertRaisesRegexp(
           ValueError, "Unknown value for unconnected_gradients: 'nonsense'"):
         gradients.gradients([y], [x], unconnected_gradients="nonsense")
+
+  @parameterized.parameters(unconnected_gradients.UnconnectedGradients.ZERO,
+                            unconnected_gradients.UnconnectedGradients.NONE)
+  def testUnconnectedOpWithMultipleOutputs(self, unconnected_gradients_val):
+    with ops.Graph().as_default():
+      #  a    b
+      #  |    |
+      # IdentityN
+      #  |    |
+      #  c    d
+      #  |
+      # Identity
+      #  |
+      #  e
+      a = constant_op.constant(1.0)
+      b = constant_op.constant(1.0)
+      c, d = array_ops.identity_n([a, b])
+      e = array_ops.identity(c)
+      # The aggregated grads for the IdentityN node would look like
+      # [Tensor, None]. We expect this None to be converted to zeros.
+      output = gradients.gradients(
+          e, d, unconnected_gradients=unconnected_gradients_val)
+      if (unconnected_gradients_val ==
+          unconnected_gradients.UnconnectedGradients.ZERO):
+        self.assertIsNotNone(output[0])
+      else:
+        self.assertIsNone(output[0])
+
+  @parameterized.parameters(unconnected_gradients.UnconnectedGradients.ZERO,
+                            unconnected_gradients.UnconnectedGradients.NONE)
+  def testUnconnectedOpWithMultipleOutputsStopGradient(
+      self, unconnected_gradients_val):
+    with ops.Graph().as_default():
+      #  a    b
+      #  |    |
+      # IdentityN
+      #  |    |
+      #  c    d
+      #  |    |
+      #  SG   |
+      #  |    |
+      #   \  /
+      #    +
+      #    e
+      a = constant_op.constant(1.0)
+      b = constant_op.constant(1.0)
+      c, d = array_ops.identity_n([a, b])
+      e = array_ops.stop_gradient(c) + d
+      # The aggregated grads for the IdentityN node would look like
+      # [None, Tensor]. We expect this None to be converted to zeros.
+      output = gradients.gradients(
+          e, c, unconnected_gradients=unconnected_gradients_val)
+      if (unconnected_gradients_val ==
+          unconnected_gradients.UnconnectedGradients.ZERO):
+        self.assertIsNotNone(output[0])
+      else:
+        self.assertIsNone(output[0])
 
 
 class FunctionGradientsTest(test_util.TensorFlowTestCase):
@@ -1018,7 +1097,7 @@ class GetDependentVariablesTest(test_util.TensorFlowTestCase):
       self.assertEqual(dependent_vars, [var])
 
 
-class CustomGradientTest(test_util.TensorFlowTestCase):
+class CustomGradientTest(test_util.TensorFlowTestCase, parameterized.TestCase):
 
   def testCustomGradientTrivial(self):
 
@@ -1057,6 +1136,24 @@ class CustomGradientTest(test_util.TensorFlowTestCase):
       with session.Session() as sess:
         self.assertAllEqual([3., 5.], self.evaluate(dy))
 
+  def testCustomGradientClass(self):
+
+    class Model(object):
+
+      @custom_gradient.custom_gradient
+      def Multiply(self, x1, x2):
+        result = x1 * x2
+        grad = lambda dy: (dy * x1, dy * x2)
+        return result, grad
+
+    with ops.Graph().as_default():
+      x1 = constant(3.)
+      x2 = constant(5.)
+      m = Model()
+      y = m.Multiply(x1, x2)
+      dy = gradients.gradients(y, [x1, x2])
+      self.assertAllEqual([3., 5.], self.evaluate(dy))
+
   def testCustomGradientErrors(self):
 
     @custom_gradient.custom_gradient
@@ -1080,7 +1177,7 @@ class CustomGradientTest(test_util.TensorFlowTestCase):
       out = core_layers.dense(x, 3, use_bias=False)
 
       def Grad(out_grad, variables=None):  # pylint: disable=redefined-outer-name
-        self.assertEqual(1, len(variables))
+        self.assertEqual(1, len(variables))  # pylint: disable=g-generic-assert
         grads = gradients.gradients(out, [x, variables[0]], grad_ys=out_grad)
         return grads[0], [array_ops.ones((4, 3))]
 
@@ -1107,7 +1204,7 @@ class CustomGradientTest(test_util.TensorFlowTestCase):
       out = core_layers.dense(x, 3, use_bias=False)
 
       def Grad(out_grad, variables=None):  # pylint: disable=redefined-outer-name
-        self.assertEqual(1, len(variables))
+        self.assertEqual(1, len(variables))  # pylint: disable=g-generic-assert
         grads = gradients.gradients(out, [x, variables[0]], grad_ys=out_grad)
         return grads[0], [array_ops.ones((3, 3))]
 
@@ -1146,7 +1243,7 @@ class CustomGradientTest(test_util.TensorFlowTestCase):
 
         def Grad(out_grad, variables=None):  # pylint: disable=redefined-outer-name
           del out_grad
-          self.assertEqual(1, len(variables))
+          self.assertEqual(1, len(variables))  # pylint: disable=g-generic-assert
           return (array_ops.ones((3, 2)),
                   [array_ops.ones((2, 4))])
 
@@ -1170,7 +1267,7 @@ class CustomGradientTest(test_util.TensorFlowTestCase):
 
       def Grad(out_grad, variables=None):  # pylint: disable=redefined-outer-name
         del out_grad
-        self.assertEqual(1, len(variables))
+        self.assertEqual(1, len(variables))  # pylint: disable=g-generic-assert
         return (array_ops.ones((3, 2)), [array_ops.ones((2, 4))])
 
       return out, Grad
@@ -1234,7 +1331,7 @@ class CustomGradientTest(test_util.TensorFlowTestCase):
       out = core_layers.dense(x, 3, use_bias=False)
 
       def Grad(out_grad, variables=None):  # pylint: disable=redefined-outer-name
-        self.assertEqual(1, len(variables))
+        self.assertEqual(1, len(variables))  # pylint: disable=g-generic-assert
         grads = gradients.gradients(out, [x, variables[0]], grad_ys=out_grad)
         return grads[0], [array_ops.ones((4, 3))]
 
@@ -1245,7 +1342,7 @@ class CustomGradientTest(test_util.TensorFlowTestCase):
       out = F(x)
 
       def Grad(out_grad, variables=None):  # pylint: disable=redefined-outer-name
-        self.assertEqual(1, len(variables))
+        self.assertEqual(1, len(variables))  # pylint: disable=g-generic-assert
         grads = gradients.gradients(out, [x, variables[0]], grad_ys=out_grad)
         return grads[0], [array_ops.ones((4, 3))]
 
@@ -1263,6 +1360,43 @@ class CustomGradientTest(test_util.TensorFlowTestCase):
         self.evaluate(variables.global_variables_initializer())
         dw = sess.run(math_ops.reduce_sum(grads[1]))
         self.assertEqual(12., dw)
+
+  @parameterized.named_parameters(
+      [(("_%s_%s" % (x_struct, y_struct)).replace(" ", "").replace("None", ""),  # pylint: disable=g-complex-comprehension
+        x_struct, y_struct)
+       for y_struct in [[None, ()], (None, (), [], (None, ((), None)))]
+       for x_struct in [(None, ()), (((), ()), [None, None], [], (None, ()))]
+      ])
+  @test_util.run_in_graph_and_eager_modes
+  def testCustomGradientStructuralInputOutput(self, x_struct, y_struct):
+    """Tests that custom_gradient can handle structured inputs/outputs."""
+    def Zeros(x):
+      return nest.map_structure(lambda _: array_ops.zeros([], "float32"), x)
+    def GetStruct(x):
+      return nest.map_structure(lambda _: None, x)
+
+    def MakeVjp(f, *x):
+      with backprop.GradientTape(persistent=True) as tape:
+        tape.watch(nest.flatten(x))
+        y = f(*x)
+      def Vjp(dy):
+        return tape.gradient(y, x, output_gradients=dy)
+      return y, Vjp
+
+    @custom_gradient.custom_gradient
+    def F(*x):
+      self.assertEqual(x_struct, GetStruct(x))
+      def Vjp(*dy):
+        self.assertEqual(len(nest.flatten(y_struct)),
+                         len(nest.flatten(dy)))
+        return nest.flatten(Zeros(x_struct))
+      return Zeros(y_struct), Vjp
+
+    x, dy = Zeros([x_struct, y_struct])
+    y, vjp = MakeVjp(F, *x)
+    dx = vjp(dy)
+    self.assertEqual(x_struct, GetStruct(dx))
+    self.assertEqual(y_struct, GetStruct(y))
 
 
 class TensorListGradientsTest(test_util.TensorFlowTestCase):
@@ -1285,40 +1419,7 @@ class TensorListGradientsTest(test_util.TensorFlowTestCase):
         self.assertEquals(self.evaluate(grad), 5.)
 
 
-class TestKerasModelClass(training.Model):
-  """A simple tensorflow keras Model class definition."""
-
-  def __init__(self, width):
-    super(TestKerasModelClass, self).__init__()
-
-    self.weight = variable_scope.get_variable(
-        name="test_keras_var",
-        shape=width,
-        dtype=dtypes.float32,
-        trainable=True,
-        use_resource=True,
-    )
-
-  def call(self, inputs):
-    return self.weight * inputs
-
-
 class VariablesGradientTest(test_util.TensorFlowTestCase):
-
-  def _TestVariablesGradient(self, inputs, test_model, vars_to_grad):
-    """Returns gradients of `test_model` with respect to `vars_to_grad`."""
-
-    test_model_re = custom_gradient.recompute_grad(test_model)
-
-    with backprop.GradientTape(persistent=True) as tape:
-      tape.watch(vars_to_grad)
-      out_re = test_model_re(inputs)
-      out = test_model(inputs)
-
-    grads_re = tape.gradient(out_re, vars_to_grad)
-    grads = tape.gradient(out, vars_to_grad)
-
-    return grads_re, grads
 
   def _TestFnVariablesGradient(self, inputs, test_fn, vars_to_grad):
     """Returns gradients of `test_model` with respect to `vars_to_grad`."""
@@ -1335,29 +1436,45 @@ class VariablesGradientTest(test_util.TensorFlowTestCase):
 
     return grads_re, grads
 
-  @test_util.run_in_graph_and_eager_modes
-  def testKerasRecompute(self):
-    """Checks that recompute_grad works for a simple Keras Model."""
+  def _grad(self, f, argnums=0):
+    """Return a function which computes the gradient of `f`."""
 
-    test_model = TestKerasModelClass(10)
-    test_input = constant(np.zeros((10, 10), dtype=np.float32))
-    self.evaluate(variables.global_variables_initializer())
-    test_model(test_input)  # Ensures keras model is initialized.
-    grads_re, grads = self._TestVariablesGradient(test_input, test_model,
-                                                  test_input)
+    def _f(*params):
+      with backprop.GradientTape() as tape:
+        tape.watch(params)
+        outputs = f(*params)
+      return tape.gradient(
+          outputs,
+          params[argnums],
+          unconnected_gradients=unconnected_gradients.UnconnectedGradients.ZERO)
 
-    grads_re = self.evaluate(grads_re)
-    grads = self.evaluate(grads)
-    for g, g_re in zip(grads, grads_re):
-      self.assertAllClose(g, g_re)
+    return _f
 
-    grads_re, grads = self._TestVariablesGradient(test_input, test_model,
-                                                  test_model.variables)
+  def _test_gradients(self, f, inputs, order, delta=1e-3, rtol=1e-2, atol=1e-6):
+    """Tests backward jacobians of `f`'s [0, `order`)-order gradients."""
+    if order < 1:
+      raise ValueError(
+          "`order` should be a positive integer, got '{}'.".format(order))
+    if order > 1:
+      self._test_gradients(
+          f=self._grad(f),
+          inputs=inputs,
+          order=order - 1,
+          delta=delta,
+          rtol=rtol,
+          atol=atol)
+    sym_jac_back, num_jac = gradient_checker_v2.compute_gradient(
+        f, inputs, delta=delta)
+    self.assertAllClose(num_jac, sym_jac_back, rtol=rtol, atol=atol)
 
-    grads_re = self.evaluate(grads_re)
-    grads = self.evaluate(grads)
-    for g, g_re in zip(grads, grads_re):
-      self.assertAllClose(g, g_re)
+  @test_util.run_v2_only
+  def testCustomGradientRecomputeGradHigherOrder(self):
+
+    @custom_gradient.recompute_grad
+    def f(x):
+      return math_ops.reduce_prod(math_ops.tanh(x)**2)
+
+    self._test_gradients(f, [constant_op.constant([1.])], order=3)
 
   @test_util.run_in_graph_and_eager_modes
   def testFnRecompute(self):
@@ -1366,14 +1483,17 @@ class VariablesGradientTest(test_util.TensorFlowTestCase):
     def TestFn(inputs, input_vars):
       return inputs * input_vars
 
+    def TestFnSeq(inputs, input_vars):
+      return (inputs * input_vars, inputs * input_vars * 2.0)
+
     with variable_scope.variable_scope("test", use_resource=True):
       test_var = variable_scope.get_variable(
           name="test_var",
           shape=10,
           trainable=True,
       )
-
-      test_input = constant(np.zeros((10, 10), dtype=np.float32))
+      self.evaluate(test_var.assign(np.ones([10])))
+      test_input = constant(np.ones((10, 10), dtype=np.float32))
 
       grads_re, grads = self._TestFnVariablesGradient(test_input, TestFn,
                                                       test_input)
@@ -1385,6 +1505,114 @@ class VariablesGradientTest(test_util.TensorFlowTestCase):
 
       grads_re, grads = self._TestFnVariablesGradient(test_input, TestFn,
                                                       test_var)
+      grads_re = self.evaluate(grads_re)
+      grads = self.evaluate(grads)
+      for g, g_re in zip(grads, grads_re):
+        self.assertAllClose(g, g_re)
+
+      # Regression test for wrapping sequence outputting functions.
+      grads_re, grads = self._TestFnVariablesGradient(test_input, TestFnSeq,
+                                                      test_input)
+      grads_re = self.evaluate(grads_re)
+      grads = self.evaluate(grads)
+      for g, g_re in zip(grads, grads_re):
+        self.assertAllClose(g, g_re)
+
+      grads_re, grads = self._TestFnVariablesGradient(test_input, TestFnSeq,
+                                                      test_var)
+      grads_re = self.evaluate(grads_re)
+      grads = self.evaluate(grads)
+      for g, g_re in zip(grads, grads_re):
+        self.assertAllClose(g, g_re)
+
+  @test_util.deprecated_graph_mode_only
+  def testFnRecomputeWithScopeGradientTape(self):
+    """Checks that recompute_grad works with var scope and GradientTape."""
+
+    def TestFn(input_t):
+      with variable_scope.variable_scope("inner_scope"):
+        test_var = variable_scope.get_variable(
+            name="test_var",
+            shape=10,
+            trainable=True,
+        )
+        self.evaluate(test_var.assign(np.ones([10])))
+        return input_t * test_var
+
+    test_input_t = constant(np.zeros((10, 10), dtype=np.float32))
+
+    with variable_scope.variable_scope(
+        "output_scope", reuse=variable_scope.AUTO_REUSE, use_resource=True):
+      test_fn_re = custom_gradient.recompute_grad(TestFn)
+
+      with backprop.GradientTape(persistent=True) as tape:
+        out_re = test_fn_re(test_input_t)
+        out = TestFn(test_input_t)
+
+    grads_re = tape.gradient(out_re, variables.trainable_variables())
+    grads = tape.gradient(out, variables.trainable_variables())
+
+    grads_re = self.evaluate(grads_re)
+    grads = self.evaluate(grads)
+    for g, g_re in zip(grads, grads_re):
+      self.assertAllClose(g, g_re)
+      self.assertAllClose(g, g_re)
+
+  @test_util.deprecated_graph_mode_only
+  def testFnRecomputeWithScopeGradients(self):
+    """Checks that recompute_grad works with var scope and gradients(..)."""
+
+    def TestFn(input_t):
+      with variable_scope.variable_scope("inner_scope"):
+        test_var = variable_scope.get_variable(
+            name="test_var",
+            shape=10,
+            trainable=True,
+        )
+        return input_t * test_var
+
+    test_input_t = constant(np.zeros((10, 10), dtype=np.float32))
+
+    with variable_scope.variable_scope(
+        "output_scope", reuse=variable_scope.AUTO_REUSE, use_resource=True):
+      test_fn_re = custom_gradient.recompute_grad(TestFn)
+      out_re = test_fn_re(test_input_t)
+      out = TestFn(test_input_t)
+
+    init = variables.global_variables_initializer()
+    self.evaluate(init)
+    grads_re = gradients.gradients(out_re, variables.trainable_variables())
+    grads = gradients.gradients(out, variables.trainable_variables())
+
+    grads_re = self.evaluate(grads_re)
+    grads = self.evaluate(grads)
+    for g, g_re in zip(grads, grads_re):
+      self.assertAllClose(g, g_re)
+      self.assertAllClose(g, g_re)
+
+  @test_util.run_in_graph_and_eager_modes
+  def testFnRecomputeSameTensor(self):
+    """Check recompute_grad when wrapped f called as f(x, x) - b/147369366."""
+
+    def TestFnMul(x, y):
+      return x * y
+
+    def TestFnSingleVar(x, y):
+      # pylint: disable=unused-argument
+      return x
+
+    with variable_scope.variable_scope("test", use_resource=True):
+      x = array_ops.ones((10))
+
+      grads_re, grads = self._TestFnVariablesGradient(x, TestFnMul,
+                                                      x)
+      grads_re = self.evaluate(grads_re)
+      grads = self.evaluate(grads)
+      for g, g_re in zip(grads, grads_re):
+        self.assertAllClose(g, g_re)
+
+      grads_re, grads = self._TestFnVariablesGradient(x, TestFnSingleVar,
+                                                      x)
       grads_re = self.evaluate(grads_re)
       grads = self.evaluate(grads)
       for g, g_re in zip(grads, grads_re):

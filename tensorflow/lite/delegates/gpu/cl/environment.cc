@@ -20,20 +20,12 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/cl/cl_kernel.h"
 #include "tensorflow/lite/delegates/gpu/cl/util.h"
+#include "tensorflow/lite/delegates/gpu/common/shape.h"
 
 namespace tflite {
 namespace gpu {
 namespace cl {
-
 namespace {
-CalculationsPrecision GetPossiblePrecision(
-    const CLDevice& gpu, CalculationsPrecision desired_precision) {
-  if (!gpu.SupportsFP16() && desired_precision != CalculationsPrecision::F32) {
-    return CalculationsPrecision::F32;
-  }
-
-  return desired_precision;
-}
 
 std::string GetKernelOneLayerTextureArray() {
   return R"(
@@ -52,38 +44,44 @@ __kernel void main_function(__write_only image2d_array_t dst) {
 // texture, we will get zeroes instead of actual values.
 // The same kernel will work, if we use texture array with more than one layer.
 // With help of this code we can detect this bug.
-Status CheckKernelSupportOfOneLayerTextureArray(Environment* env,
-                                                bool* result) {
+absl::Status CheckKernelSupportOfOneLayerTextureArray(Environment* env,
+                                                      bool* result) {
   // No bug on Adreno 6xx
   if (env->device().GetInfo().adreno_info.gpu_version >= 600) {
     *result = true;
-    return OkStatus();
+    return absl::OkStatus();
   }
   CLKernel kernel;
-  RETURN_IF_ERROR(CreateKernel(GetKernelOneLayerTextureArray(), "main_function",
-                               env, &kernel));
+  RETURN_IF_ERROR(env->program_cache()->GetOrCreateCLKernel(
+      GetKernelOneLayerTextureArray(), "main_function", env->context(),
+      env->device(), &kernel));
+
   Tensor tensor;
-  RETURN_IF_ERROR(CreateTensor(env->context(), env->device(), 4, 4, 4,
-                               DataType::FLOAT32,
-                               TensorStorageType::TEXTURE_ARRAY, &tensor));
+  const BHWC shape(1, 4, 4, 4);
+  RETURN_IF_ERROR(CreateTensor(
+      env->context(), env->device(), shape,
+      {DataType::FLOAT32, TensorStorageType::TEXTURE_ARRAY, Layout::HWC},
+      &tensor));
   RETURN_IF_ERROR(kernel.SetMemory(0, tensor.GetMemoryPtr()));
   RETURN_IF_ERROR(env->queue()->DispatchImplicit(kernel, {4, 4, 1}, {4, 4, 1}));
-  std::vector<float> cpu_data(64, 0.0f);
-  RETURN_IF_ERROR(tensor.ReadDataBHWC(absl::MakeSpan(cpu_data), env->queue()));
+  TensorFloat32 tensor_gpu;
+  tensor_gpu.shape = shape;
+  tensor_gpu.data.resize(shape.DimensionsProduct());
+  RETURN_IF_ERROR(tensor.ReadData(env->queue(), &tensor_gpu));
 
   *result = true;
   for (int i = 0; i < 64; ++i) {
-    if (cpu_data[i] != 2.0) {
+    if (tensor_gpu.data[i] != 2.0) {
       *result = false;
       break;
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
-Status CreateEnvironment(Environment* result, bool shared,
-                         cl_context_properties egl_context,
-                         cl_context_properties egl_display) {
+absl::Status CreateEnvironment(Environment* result, bool shared,
+                               cl_context_properties egl_context,
+                               cl_context_properties egl_display) {
   CLDevice gpu;
   RETURN_IF_ERROR(CreateDefaultGPUDevice(&gpu));
 
@@ -110,8 +108,9 @@ Status CreateEnvironment(Environment* result, bool shared,
     }
   }
 
-  return OkStatus();
+  return absl::OkStatus();
 }
+
 }  // namespace
 
 Environment::Environment(CLDevice&& device, CLContext&& context,
@@ -138,6 +137,18 @@ Environment& Environment::operator=(Environment&& environment) {
     program_cache_ = std::move(environment.program_cache_);
   }
   return *this;
+}
+
+absl::Status Environment::Init() {
+  if (device().IsAdreno() && device().SupportsTextureArray()) {
+    bool supports_one_layer;
+    RETURN_IF_ERROR(
+        CheckKernelSupportOfOneLayerTextureArray(this, &supports_one_layer));
+    if (!supports_one_layer) {
+      GetDevicePtr()->DisableOneLayerTextureArray();
+    }
+  }
+  return absl::OkStatus();
 }
 
 void Environment::SetHighPerformance() const {
@@ -174,65 +185,107 @@ bool Environment::IsSupported(CalculationsPrecision precision) const {
   }
 }
 
-std::vector<TensorStorageType> Environment::GetSupportedTextureStorages()
-    const {
-  std::vector<TensorStorageType> storage_types = {
-      TensorStorageType::TEXTURE_2D};
-  if (device_.SupportsTextureArray()) {
-    storage_types.push_back(TensorStorageType::TEXTURE_ARRAY);
-  }
-  return storage_types;
-}
-
 std::vector<TensorStorageType> Environment::GetSupportedStorages() const {
-  std::vector<TensorStorageType> storage_types = {TensorStorageType::TEXTURE_2D,
-                                                  TensorStorageType::BUFFER};
-  if (device_.SupportsTextureArray()) {
-    storage_types.push_back(TensorStorageType::TEXTURE_ARRAY);
-  }
-  return storage_types;
-}
-
-TensorStorageType GetOptimalStorageType(const CLDevice& gpu) {
-  TensorStorageType storage_type;
-  if (gpu.vendor() != Vendor::QUALCOMM) {
-    storage_type = TensorStorageType::BUFFER;
-  } else {
-    if (gpu.IsAdreno6xxOrHigher()) {
-      storage_type = TensorStorageType::TEXTURE_ARRAY;
-    } else {
-      storage_type = TensorStorageType::TEXTURE_2D;
+  std::vector<TensorStorageType> storage_types;
+  for (auto storage_type :
+       {TensorStorageType::TEXTURE_2D, TensorStorageType::BUFFER,
+        TensorStorageType::TEXTURE_ARRAY, TensorStorageType::IMAGE_BUFFER,
+        TensorStorageType::TEXTURE_3D}) {
+    if (IsSupported(storage_type)) {
+      storage_types.push_back(storage_type);
     }
   }
-
-  return storage_type;
+  return storage_types;
 }
 
-Status CreateDefaultEnvironment(Environment* result) {
-  return CreateEnvironment(result, false, 0, 0);
+bool Environment::IsSupported(TensorStorageType storage_type) const {
+  switch (storage_type) {
+    case TensorStorageType::TEXTURE_2D:
+      return !device_.IsAMD();
+    case TensorStorageType::BUFFER:
+      return true;
+    case TensorStorageType::TEXTURE_ARRAY:
+      return !device_.IsAMD() && device_.SupportsTextureArray();
+    case TensorStorageType::IMAGE_BUFFER:
+      return (device_.IsAdreno() || device_.IsAMD() || device_.IsNvidia()) &&
+             device_.SupportsImageBuffer();
+    case TensorStorageType::TEXTURE_3D:
+      return !device_.IsAMD() && device_.SupportsImage3D();
+    case TensorStorageType::SINGLE_TEXTURE_2D:
+      return false;
+    case TensorStorageType::UNKNOWN:
+      return false;
+  }
+  return false;
 }
 
-Status CreateEnvironment(Environment* result) {
-  return CreateEnvironment(result, false, 0, 0);
+TensorStorageType GetFastestStorageType(const CLDevice& gpu) {
+  if (gpu.IsAdreno()) {
+    if (gpu.IsAdreno6xxOrHigher()) {
+      return TensorStorageType::TEXTURE_ARRAY;
+    } else {
+      return TensorStorageType::TEXTURE_2D;
+    }
+  } else if (gpu.IsPowerVR()) {
+    return TensorStorageType::TEXTURE_2D;
+  } else if (gpu.IsMali()) {
+    const MaliInfo mali_info = gpu.GetInfo().mali_info;
+    if (mali_info.IsMaliT8xx() || mali_info.IsBifrostGen3() ||
+        mali_info.IsValhall()) {
+      return TensorStorageType::TEXTURE_2D;
+    } else {
+      return TensorStorageType::BUFFER;
+    }
+  } else if (gpu.IsNvidia()) {
+    return gpu.SupportsImageBuffer() ? TensorStorageType::IMAGE_BUFFER
+                                     : TensorStorageType::BUFFER;
+  } else if (gpu.IsAMD()) {
+    return gpu.SupportsImageBuffer() ? TensorStorageType::IMAGE_BUFFER
+                                     : TensorStorageType::BUFFER;
+  } else if (gpu.IsIntel()) {
+    return TensorStorageType::BUFFER;
+  }
+  return TensorStorageType::BUFFER;
 }
 
-Status CreateGLCompatibleEnvironment(cl_context_properties egl_context,
-                                     cl_context_properties egl_display,
-                                     Environment* result) {
-  return CreateEnvironment(result, true, egl_context, egl_display);
+TensorStorageType GetStorageTypeWithMinimalMemoryConsumption(
+    const CLDevice& gpu) {
+  if (gpu.IsAdreno()) {
+    if (gpu.IsAdreno3xx() || gpu.IsAdreno4xx()) {
+      return TensorStorageType::BUFFER;
+    } else {
+      return TensorStorageType::IMAGE_BUFFER;
+    }
+  } else if (gpu.IsPowerVR()) {
+    return TensorStorageType::BUFFER;
+  } else if (gpu.IsMali()) {
+    return TensorStorageType::BUFFER;
+  } else if (gpu.IsNvidia()) {
+    return gpu.SupportsImageBuffer() ? TensorStorageType::IMAGE_BUFFER
+                                     : TensorStorageType::BUFFER;
+  } else if (gpu.IsAMD()) {
+    return gpu.SupportsImageBuffer() ? TensorStorageType::IMAGE_BUFFER
+                                     : TensorStorageType::BUFFER;
+  } else if (gpu.IsIntel()) {
+    return TensorStorageType::BUFFER;
+  }
+  return TensorStorageType::BUFFER;
 }
 
-Status CreateKernel(const std::string& code, const std::string& function_name,
-                    Environment* env, CLKernel* result) {
-  return CreateKernel(code, function_name, {}, env, result);
-}
+absl::Status CreateEnvironment(Environment* result) {
+  CLDevice gpu;
+  RETURN_IF_ERROR(CreateDefaultGPUDevice(&gpu));
 
-Status CreateKernel(const std::string& code, const std::string& function_name,
-                    const std::vector<CompilerOptions>& compiler_options,
-                    Environment* env, CLKernel* result) {
-  return env->program_cache()->GetOrCreateCLKernel(
-      code, function_name, compiler_options, env->context(), env->device(),
-      result);
+  CLContext context;
+  RETURN_IF_ERROR(CreateCLContext(gpu, &context));
+  CLCommandQueue queue;
+  RETURN_IF_ERROR(CreateCLCommandQueue(gpu, context, &queue));
+  ProfilingCommandQueue profiling_queue;
+  RETURN_IF_ERROR(CreateProfilingCommandQueue(gpu, context, &profiling_queue));
+
+  *result = Environment(std::move(gpu), std::move(context), std::move(queue),
+                        std::move(profiling_queue));
+  return result->Init();
 }
 
 }  // namespace cl

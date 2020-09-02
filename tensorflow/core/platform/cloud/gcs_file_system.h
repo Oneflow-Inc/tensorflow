@@ -21,7 +21,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/cloud/auth_provider.h"
 #include "tensorflow/core/platform/cloud/compute_engine_metadata_client.h"
 #include "tensorflow/core/platform/cloud/compute_engine_zone_provider.h"
@@ -30,8 +29,9 @@ limitations under the License.
 #include "tensorflow/core/platform/cloud/gcs_dns_cache.h"
 #include "tensorflow/core/platform/cloud/gcs_throttle.h"
 #include "tensorflow/core/platform/cloud/http_request.h"
-#include "tensorflow/core/platform/cloud/retrying_file_system.h"
 #include "tensorflow/core/platform/file_system.h"
+#include "tensorflow/core/platform/retrying_file_system.h"
+#include "tensorflow/core/platform/status.h"
 
 namespace tensorflow {
 
@@ -122,7 +122,8 @@ class GcsFileSystem : public FileSystem {
                 size_t matching_paths_cache_max_entries,
                 RetryConfig retry_config, TimeoutConfig timeouts,
                 const std::unordered_set<string>& allowed_locations,
-                std::pair<const string, const string>* additional_header);
+                std::pair<const string, const string>* additional_header,
+                bool compose_append);
 
   Status NewRandomAccessFile(
       const string& fname, std::unique_ptr<RandomAccessFile>* result) override;
@@ -166,6 +167,9 @@ class GcsFileSystem : public FileSystem {
   /// Set an object to collect runtime statistics from the GcsFilesystem.
   void SetStats(GcsStatsInterface* stats);
 
+  /// Set an object to collect file block cache stats.
+  void SetCacheStats(FileBlockCacheStatsInterface* cache_stats);
+
   /// These accessors are mainly for testing purposes, to verify that the
   /// environment variables that control these parameters are handled correctly.
   size_t block_size() {
@@ -184,6 +188,8 @@ class GcsFileSystem : public FileSystem {
   std::unordered_set<string> allowed_locations() const {
     return allowed_locations_;
   }
+
+  bool compose_append() const { return compose_append_; }
   string additional_header_name() const {
     return additional_header_ ? additional_header_->first : "";
   }
@@ -258,8 +264,23 @@ class GcsFileSystem : public FileSystem {
       size_t block_size, size_t max_bytes, uint64 max_staleness);
 
   /// Loads file contents from GCS for a given filename, offset, and length.
-  Status LoadBufferFromGCS(const string& fname, size_t offset, size_t n,
-                           char* buffer, size_t* bytes_transferred);
+  virtual Status LoadBufferFromGCS(const string& fname, size_t offset, size_t n,
+                                   char* buffer, size_t* bytes_transferred);
+
+  Status ParseGcsPathForScheme(StringPiece fname, string scheme,
+                               bool empty_object_ok, string* bucket,
+                               string* object);
+
+  /// \brief Splits a GCS path to a bucket and an object.
+  ///
+  /// For example, "gs://bucket-name/path/to/file.txt" gets split into
+  /// "bucket-name" and "path/to/file.txt".
+  /// If fname only contains the bucket and empty_object_ok = true, the returned
+  /// object is empty.
+  virtual Status ParseGcsPath(StringPiece fname, bool empty_object_ok,
+                              string* bucket, string* object);
+
+  std::shared_ptr<ComputeEngineMetadataClient> compute_engine_metadata_client_;
 
  private:
   // GCS file statistics.
@@ -331,7 +352,7 @@ class GcsFileSystem : public FileSystem {
   void ClearFileCaches(const string& fname);
 
   mutex mu_;
-  std::unique_ptr<AuthProvider> auth_provider_ GUARDED_BY(mu_);
+  std::unique_ptr<AuthProvider> auth_provider_ TF_GUARDED_BY(mu_);
   std::shared_ptr<HttpRequest::Factory> http_request_factory_;
   std::unique_ptr<ZoneProvider> zone_provider_;
 
@@ -342,8 +363,7 @@ class GcsFileSystem : public FileSystem {
   // FileBlockCache instances are themselves threadsafe).
   mutex block_cache_lock_;
   std::unique_ptr<FileBlockCache> file_block_cache_
-      GUARDED_BY(block_cache_lock_);
-  std::shared_ptr<ComputeEngineMetadataClient> compute_engine_metadata_client_;
+      TF_GUARDED_BY(block_cache_lock_);
   std::unique_ptr<GcsDnsCache> dns_cache_;
   GcsThrottle throttle_;
 
@@ -356,6 +376,7 @@ class GcsFileSystem : public FileSystem {
   using BucketLocationCache = ExpiringLRUCache<string>;
   std::unique_ptr<BucketLocationCache> bucket_location_cache_;
   std::unordered_set<string> allowed_locations_;
+  bool compose_append_;
 
   TimeoutConfig timeouts_;
 

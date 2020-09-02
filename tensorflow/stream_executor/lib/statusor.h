@@ -92,7 +92,8 @@ class StatusOr : private internal_statusor::StatusOrData<T>,
   typedef internal_statusor::StatusOrData<T> Base;
 
  public:
-  typedef T element_type;
+  typedef T element_type;  // DEPRECATED: use `value_type`.
+  typedef T value_type;
 
   // Constructs a new StatusOr with Status::UNKNOWN status.  This is marked
   // 'explicit' to try to catch cases like 'return {};', where people think
@@ -273,7 +274,9 @@ const Status& StatusOr<T>::status() const & {
 }
 template <typename T>
 Status StatusOr<T>::status() && {
-  return ok() ? Status::OK() : std::move(this->status_);
+  // Note that we copy instead of moving the status here so that
+  // ~StatusOrData() can call ok() without invoking UB.
+  return ok() ? Status::OK() : this->status_;
 }
 
 template <typename T>

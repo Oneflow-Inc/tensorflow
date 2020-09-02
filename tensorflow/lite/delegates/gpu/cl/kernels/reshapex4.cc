@@ -25,36 +25,49 @@ namespace gpu {
 namespace cl {
 namespace {
 
-std::string GetReshapeCode(
-    const TensorDescriptor& src_descriptor,
-    const TensorDescriptor& dst_descriptor, CalculationsPrecision precision,
-    const std::vector<ElementwiseOperation*>& linked_operations) {
-  TensorCodeGenerator src_tensor("src_data", "src_size", src_descriptor);
-  TensorCodeGenerator dst_tensor("dst_data", "dst_size", dst_descriptor);
+std::string GetReshapeCode(const OperationDef& op_def, Arguments* args) {
+  args->AddObjectRef(
+      "src_tensor", AccessType::READ,
+      absl::make_unique<TensorDescriptor>(op_def.src_tensors[0]));
+  args->AddObjectRef(
+      "dst_tensor", AccessType::WRITE,
+      absl::make_unique<TensorDescriptor>(op_def.dst_tensors[0]));
 
-  std::string c = GetCommonDefines(precision);
+  std::string c = GetCommonDefines(op_def.precision);
   c += "__kernel void main_function(\n";
-  c += src_tensor.GetDeclaration(AccessType::READ);
-  c += GetArgsDeclaration(linked_operations);
-  c += dst_tensor.GetDeclaration(AccessType::WRITE) + ",\n";
-  c += "    int4 src_size,             \n";
-  c += "    int4 dst_size,             \n";
-  c += "    int2 plane_xz            \n";
-  c += ") {\n";
-  c += "  int X = get_global_id(0);\n";
+  c += "$0) {\n";
+  if (op_def.dst_tensors[0].HasAxis(Axis::BATCH)) {
+    c += "  int linear_id = get_global_id(0);\n";
+    c += "  int X = linear_id / args.dst_tensor.Batch();\n";
+    c += "  int B = linear_id % args.dst_tensor.Batch();\n";
+    c += "  args.dst_tensor.SetBatchRef(B);\n";
+  } else {
+    c += "  int X = get_global_id(0);\n";
+  }
   c += "  int Y = get_global_id(1);\n";
   c += "  int Z = get_global_id(2);\n";
-  c += "  if (X >= dst_size.x || Y >= dst_size.y) { \n";
+  c += "  if (X >= args.dst_tensor.Width() || Y >= args.dst_tensor.Height() || "
+       "Z >= args.dst_tensor.Slices()) { \n";
   c += "    return; \n";
   c += "  } \n";
-  c += "  int p = Z + dst_size.w * X + plane_xz.y * Y;\n";
-  c += "  int src_y = p / plane_xz.x;\n";
-  c += "  int src_x = (p % plane_xz.x) / src_size.w;\n";
-  c += "  int src_z = (p % plane_xz.x) % src_size.w;\n";
-  c += "  FLT4 result =" + src_tensor.Read3D("src_x", "src_y", "src_z") + ";\n";
-  c += "  " + dst_tensor.GetAddress("dst_adr", "X", "Y", "Z");
-  c += PostProcess(linked_operations, "result", "Z", "dst_adr");
-  c += "  " + dst_tensor.Write3D("result", "dst_adr");
+  if (op_def.dst_tensors[0].HasAxis(Axis::BATCH)) {
+    c += "  int dst_bhwc4 = B;\n";
+  } else {
+    c += "  int dst_bhwc4 = 0;\n";
+  }
+  c += "  dst_bhwc4 = ((dst_bhwc4 * args.dst_tensor.Height() + Y) * "
+       "args.dst_tensor.Width() + X) * args.dst_tensor.Slices() + Z;\n";
+  c += "  int src_z = dst_bhwc4 % args.src_tensor.Slices();\n";
+  c += "  dst_bhwc4 = dst_bhwc4 / args.src_tensor.Slices();\n";
+  c += "  int src_x = dst_bhwc4 % args.src_tensor.Width();\n";
+  c += "  dst_bhwc4 = dst_bhwc4 / args.src_tensor.Width();\n";
+  c += "  int src_y = dst_bhwc4 % args.src_tensor.Height();\n";
+  if (op_def.src_tensors[0].HasAxis(Axis::BATCH)) {
+    c += "  int src_b = dst_bhwc4 / args.src_tensor.Height();\n";
+    c += "  args.src_tensor.SetBatchRef(src_b);\n";
+  }
+  c += "  FLT4 result = args.src_tensor.Read(src_x, src_y, src_z);\n";
+  c += "  args.dst_tensor.Write(result, X, Y, Z);\n";
   c += "}\n";
   return c;
 }
@@ -74,42 +87,39 @@ Reshapex4& Reshapex4::operator=(Reshapex4&& operation) {
   return *this;
 }
 
-Status Reshapex4::Compile(const CreationContext& creation_context) {
-  const auto code =
-      GetReshapeCode(definition_.src_tensors[0], definition_.dst_tensors[0],
-                     definition_.precision, linked_operations_);
+absl::Status Reshapex4::Compile(const CreationContext& creation_context) {
+  std::string code = GetReshapeCode(definition_, &args_);
+  std::string element_wise_code;
+  RETURN_IF_ERROR(
+      MergeOperations(linked_operations_, &args_, &element_wise_code));
+  RETURN_IF_ERROR(args_.TransformToCLCode(creation_context.device->GetInfo(),
+                                          {{"dst_tensor", element_wise_code}},
+                                          &code));
   return creation_context.cache->GetOrCreateCLKernel(
       code, "main_function", *creation_context.context,
       *creation_context.device, &kernel_);
 }
 
-Status Reshapex4::BindArguments() {
-  kernel_.ResetBindingCounter();
-  RETURN_IF_ERROR(kernel_.SetMemoryAuto(src_[0]->GetMemoryPtr()));
-  RETURN_IF_ERROR(BindArgs(&kernel_, linked_operations_));
-  RETURN_IF_ERROR(kernel_.SetMemoryAuto(dst_[0]->GetMemoryPtr()));
-  RETURN_IF_ERROR(kernel_.SetBytesAuto(src_[0]->GetSizeWithDepth()));
-  RETURN_IF_ERROR(kernel_.SetBytesAuto(dst_[0]->GetSizeWithDepth()));
-  const int2 plane_size = int2(src_[0]->Width() * src_[0]->Depth(),
-                               dst_[0]->Width() * dst_[0]->Depth());
-  RETURN_IF_ERROR(kernel_.SetBytesAuto(plane_size));
-
-  return OkStatus();
+absl::Status Reshapex4::BindArguments() {
+  RETURN_IF_ERROR(args_.SetObjectRef("src_tensor", src_[0]));
+  RETURN_IF_ERROR(args_.SetObjectRef("dst_tensor", dst_[0]));
+  RETURN_IF_ERROR(SetArguments(linked_operations_, &args_));
+  return args_.Bind(kernel_.kernel());
 }
 
 int3 Reshapex4::GetGridSize() const {
-  const int grid_x = dst_[0]->Width();
+  const int grid_x = dst_[0]->Width() * dst_[0]->Batch();
   const int grid_y = dst_[0]->Height();
-  const int grid_z = dst_[0]->Depth();
+  const int grid_z = dst_[0]->Slices();
   return int3(grid_x, grid_y, grid_z);
 }
 
-Status Reshapex4::Tune(const TuningParameters& params) {
+absl::Status Reshapex4::Tune(const TuningParameters& params) {
   RETURN_IF_ERROR(BindArguments());
   return GetBestWorkGroup(params, kernel_, GetGridSize(), &work_group_size_);
 }
 
-Status Reshapex4::AddToQueue(CLCommandQueue* queue) {
+absl::Status Reshapex4::AddToQueue(CLCommandQueue* queue) {
   RETURN_IF_ERROR(BindArguments());
   return queue->DispatchImplicit(kernel_, GetGridSize(), work_group_size_);
 }

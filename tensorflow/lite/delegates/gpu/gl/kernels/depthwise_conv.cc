@@ -36,26 +36,25 @@ namespace {
 
 class DepthwiseConvolution : public NodeShader {
  public:
-  Status GenerateCode(const GenerationContext& ctx,
-                      GeneratedCode* generated_code) const final {
-    auto input = ctx.graph->FindInputs(ctx.node->id)[0];
-    auto attr = absl::any_cast<const DepthwiseConvolution2DAttributes&>(
-        ctx.node->operation.attributes);
+  absl::Status GenerateCode(const GenerationContext& ctx,
+                            GeneratedCode* generated_code) const final {
+    const auto& attr =
+        absl::any_cast<const DepthwiseConvolution2DAttributes&>(ctx.op_attr);
     auto weights = attr.weights.shape;
     const int offsets_count = weights.h * weights.w;
     const bool offsets_count_too_large = offsets_count > kMaxConstArraySize;
     std::vector<Variable> parameters;
     if (offsets_count_too_large) {
       parameters = {
-          {"input_data_0_h", input->tensor.shape.h},
-          {"input_data_0_w", input->tensor.shape.w},
+          {"input_data_0_h", static_cast<int>(ctx.input_shapes[0][1])},
+          {"input_data_0_w", static_cast<int>(ctx.input_shapes[0][2])},
           {"padding_w", attr.padding.prepended.w},
           {"padding_h", attr.padding.prepended.h},
           {"dilation_w", attr.dilations.w},
           {"dilation_h", attr.dilations.h},
           {"kernel_w", weights.w},
           {"kernel_h", weights.h},
-          {"src_depth", IntegralDivideRoundUp(weights.i, 4)},
+          {"src_depth", DivideRoundUp(weights.i, 4)},
           {"channel_multiplier", weights.o},
           {"stride", int2(attr.strides.w, attr.strides.h)},
       };
@@ -68,11 +67,11 @@ class DepthwiseConvolution : public NodeShader {
         }
       }
       parameters = {
-          {"input_data_0_h", input->tensor.shape.h},
-          {"input_data_0_w", input->tensor.shape.w},
+          {"input_data_0_h", static_cast<int>(ctx.input_shapes[0][1])},
+          {"input_data_0_w", static_cast<int>(ctx.input_shapes[0][2])},
           {"offsets_count", offsets_count},
           {"offsets", offsets},
-          {"src_depth", IntegralDivideRoundUp(weights.i, 4)},
+          {"src_depth", DivideRoundUp(weights.i, 4)},
           {"channel_multiplier", weights.o},
           {"stride", int2(attr.strides.w, attr.strides.h)},
       };
@@ -112,11 +111,12 @@ class DepthwiseConvolution : public NodeShader {
     source += R"(
         int src_layer = gid.z / $channel_multiplier$;
         vec4 input_ = $input_data_0[coord.x, coord.y, src_layer]$;
-        highp vec4 input_shifted;
-        input_shifted[0] = input_[(src_layer_offset + 0) / $channel_multiplier$];
-        input_shifted[1] = input_[(src_layer_offset + 1) / $channel_multiplier$];
-        input_shifted[2] = input_[(src_layer_offset + 2) / $channel_multiplier$];
-        input_shifted[3] = input_[(src_layer_offset + 3) / $channel_multiplier$];
+        vec4 input_shifted = vec4(
+          input_[(src_layer_offset + 0) / $channel_multiplier$],
+          input_[(src_layer_offset + 1) / $channel_multiplier$],
+          input_[(src_layer_offset + 2) / $channel_multiplier$],
+          input_[(src_layer_offset + 3) / $channel_multiplier$]
+        );
         int filter_offset = gid.z * offsets_count + i;
         value_0 += input_shifted * $weights[filter_offset]$;
       }
@@ -139,13 +139,13 @@ class DepthwiseConvolution : public NodeShader {
         GetIdealWorkgroupIfPossible(
             ctx.gpu_info->gpu_model, OperationType::DEPTHWISE_CONVOLUTION,
             HW(attr.weights.shape.h, attr.weights.shape.w), attr.strides,
-            OHWI(attr.weights.shape.o, input->tensor.shape.h,
-                 input->tensor.shape.w, input->tensor.shape.c)),
+            OHWI(attr.weights.shape.o, ctx.input_shapes[0][1],
+                 ctx.input_shapes[0][2], ctx.input_shapes[0][3])),
         /*source_code=*/std::move(source),
         /*input=*/IOStructure::ONLY_DEFINITIONS,
         /*output=*/IOStructure::AUTO,
     };
-    return OkStatus();
+    return absl::OkStatus();
   }
 };
 

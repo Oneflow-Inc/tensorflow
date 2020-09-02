@@ -110,14 +110,14 @@ def build_tensor_info_from_op(op):
   is for the Op of the call site for the defunned function:
   ```python
     @function.defun
-    def some_vairable_initialiation_fn(value_a, value_b):
+    def some_variable_initialization_fn(value_a, value_b):
       a = value_a
       b = value_b
 
     value_a = constant_op.constant(1, name="a")
     value_b = constant_op.constant(2, name="b")
     op_info = utils.build_op_info(
-        some_vairable_initialiation_fn(value_a, value_b))
+        some_variable_initialization_fn(value_a, value_b))
   ```
 
   Args:
@@ -178,7 +178,7 @@ def get_tensor_from_tensor_info(tensor_info, graph=None, import_scope=None):
     spec = struct_coder.decode_proto(spec_proto)
     components = [_get_tensor(component.name) for component in
                   tensor_info.composite_tensor.components]
-    return spec.from_components(components)
+    return nest.pack_sequence_as(spec, components, expand_composites=True)
   else:
     raise ValueError("Invalid TensorInfo.encoding: %s" % encoding)
 
@@ -244,3 +244,19 @@ def get_assets_dir(export_dir):
   return os.path.join(
       compat.as_text(export_dir),
       compat.as_text(constants.ASSETS_DIRECTORY))
+
+
+def get_or_create_debug_dir(export_dir):
+  """Returns path to the debug sub-directory, creating if it does not exist."""
+  debug_dir = get_debug_dir(export_dir)
+
+  if not file_io.file_exists(debug_dir):
+    file_io.recursive_create_dir(debug_dir)
+
+  return debug_dir
+
+
+def get_debug_dir(export_dir):
+  """Returns path to the debug sub-directory in the SavedModel."""
+  return os.path.join(
+      compat.as_text(export_dir), compat.as_text(constants.DEBUG_DIRECTORY))

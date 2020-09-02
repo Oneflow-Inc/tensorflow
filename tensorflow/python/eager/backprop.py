@@ -14,6 +14,9 @@
 # ==============================================================================
 """Code for backpropagation using the tape utilities."""
 
+# TODO(b/159343581): Properly support CompositeTensor in all functions in this
+# file.
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -24,7 +27,9 @@ import sys
 
 import six
 
-from tensorflow.python import pywrap_tensorflow
+from tensorflow.python import pywrap_tfe
+from tensorflow.python import _pywrap_utils
+from tensorflow.python.eager import backprop_util
 from tensorflow.python.eager import context
 from tensorflow.python.eager import execute
 from tensorflow.python.eager import imperative_grad
@@ -36,6 +41,8 @@ from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import check_ops
+from tensorflow.python.ops import control_flow_util
+from tensorflow.python.ops import default_gradient
 from tensorflow.python.ops import gen_array_ops
 from tensorflow.python.ops import gen_math_ops
 from tensorflow.python.ops import math_ops
@@ -55,6 +62,9 @@ from tensorflow.python.util.tf_export import tf_export
 pfor_ops = LazyLoader(
     "pfor_ops", globals(),
     "tensorflow.python.ops.parallel_for.control_flow_ops")
+np_arrays = LazyLoader(
+    "np_arrays", globals(),
+    "tensorflow.python.ops.numpy_ops.np_arrays")
 
 function = LazyLoader("function", globals(),
                       "tensorflow.python.eager.function")
@@ -68,21 +78,27 @@ def op_attr_type(op_type, attr_name):
   except KeyError:
     context.ensure_initialized()
     h = context.context()._handle  # pylint: disable=protected-access
-    attr_type = pywrap_tensorflow.TFE_OpNameGetAttrType(h, op_type, attr_name)
+    attr_type = pywrap_tfe.TFE_OpNameGetAttrType(h, op_type, attr_name)
   _op_attr_type_cache[(op_type, attr_name)] = attr_type
   return attr_type
 
 
 def make_attr(attr_type, value):
-  if attr_type == pywrap_tensorflow.TF_ATTR_TYPE:
+  # pybind11 enums do not return the raw value like SWIG enums do. They are
+  # useful when comparing amongst each other but not direct integers as we are
+  # doing in most tests.
+  # https://pybind11.readthedocs.io/en/stable/classes.html#enumerations-and-internal-types
+  # TODO(amitpatankar): After all SWIG transitions, convert the enum comparisons
+  # from integer value to class.
+  if attr_type == int(pywrap_tfe.TF_ATTR_TYPE):
     return dtypes.as_dtype(value)
-  elif attr_type == [pywrap_tensorflow.TF_ATTR_TYPE]:
+  if attr_type == [int(pywrap_tfe.TF_ATTR_TYPE)]:
     return [dtypes.as_dtype(v) for v in value]
-  elif attr_type == pywrap_tensorflow.TF_ATTR_SHAPE:
+  if attr_type == int(pywrap_tfe.TF_ATTR_SHAPE):
     return tensor_shape.as_shape(value).as_proto()
-  elif attr_type == [pywrap_tensorflow.TF_ATTR_SHAPE]:
+  if attr_type == [int(pywrap_tfe.TF_ATTR_SHAPE)]:
     return [tensor_shape.as_shape(v).as_proto() for v in value]
-  elif isinstance(value, str):
+  if isinstance(value, str):
     return value.encode()
   return value
 
@@ -114,7 +130,7 @@ class _MockOp(object):
 
 
 def _gradient_function(op_name, attr_tuple, num_inputs, inputs, outputs,
-                       out_grads, skip_input_indices):
+                       out_grads, skip_input_indices, forward_pass_name_scope):
   """Calls the gradient function of the op.
 
   Args:
@@ -126,6 +142,7 @@ def _gradient_function(op_name, attr_tuple, num_inputs, inputs, outputs,
     out_grads: gradients of the operation wrt its outputs.
     skip_input_indices: a tuple that is passed to the gradient function,
       indicating which inputs to skip calculating the gradient for
+    forward_pass_name_scope: the namescope of the op in the forward pass.
 
   Returns:
     The gradients with respect to the inputs of the function, as a list.
@@ -135,17 +152,31 @@ def _gradient_function(op_name, attr_tuple, num_inputs, inputs, outputs,
   if grad_fn is None:
     return [None] * num_inputs
 
-  return grad_fn(mock_op, *out_grads)
+  # This does not work with v1 TensorArrays.
+  if ops.executing_eagerly_outside_functions(
+  ) or control_flow_util.EnableControlFlowV2(ops.get_default_graph()):
+    gradient_name_scope = "gradient_tape/"
+    if forward_pass_name_scope:
+      gradient_name_scope += forward_pass_name_scope + "/"
+    with ops.name_scope(gradient_name_scope):
+      return grad_fn(mock_op, *out_grads)
+  else:
+    return grad_fn(mock_op, *out_grads)
 
 
-pywrap_tensorflow.TFE_Py_RegisterGradientFunction(_gradient_function)
+pywrap_tfe.TFE_Py_RegisterGradientFunction(_gradient_function)
 
 
-def _record_gradient(op_name, inputs, attrs, results, name):
-  return pywrap_tensorflow.TFE_Py_RecordGradient(op_name, inputs, attrs,
-                                                 results, name)
+def _must_record_gradient():
+  return not pywrap_tfe.TFE_Py_TapeSetIsEmpty()
 
 
+def _record_gradient(op_name, inputs, attrs, results):
+  return pywrap_tfe.TFE_Py_RecordGradient(op_name, inputs, attrs, results,
+                                          ops.get_name_scope())
+
+
+execute.must_record_gradient = _must_record_gradient
 execute.record_gradient = _record_gradient
 
 
@@ -216,6 +247,11 @@ def implicit_val_and_grad(f):
                        "function was being computed.")
 
     sources = [v.handle for v in variables]
+    for s in sources:
+      if getattr(s, "is_packed", False):
+        raise ValueError(
+            "GradientTape.gradient is not supported on packed EagerTensors yet."
+        )
     grad = imperative_grad.imperative_grad(this_tape, nest.flatten(end_node),
                                            sources)
     return end_node, list(zip(grad, variables))
@@ -288,7 +324,10 @@ def _get_arg_spec(f, params, param_args):
   if params is None:
     if not args:
       return range(len(param_args))
-    return range(len(args))
+    if args[0] == "self":
+      return range(len(args) - 1)
+    else:
+      return range(len(args))
   elif all(isinstance(x, six.string_types) for x in params):
     return [args.index(n) for n in params]
   elif all(isinstance(x, int) for x in params):
@@ -501,7 +540,7 @@ def make_vjp(f, params=None, persistent=True):
     wrapped_fn = tfe.make_vjp(f)
     result, vjp = wrapped_fn(tf.constant(3.0))
     # result is 9.0
-    vjp()  # the vjp function rturns 6.0
+    vjp()  # the vjp function returns 6.0
 
   Raises:
     ValueError: if `f` returns None.
@@ -520,6 +559,10 @@ def make_vjp(f, params=None, persistent=True):
       ]
       args = _ensure_unique_tensor_objects(parameter_positions, args)
       for i in parameter_positions:
+        if getattr(args[i], "is_packed", False):
+          raise ValueError(
+              "GradientTape.gradient is not supported on packed EagerTensors"
+              "yet.")
         sources.append(args[i])
         tape.watch(this_tape, args[i])
       result = f(*args)
@@ -559,28 +602,27 @@ def aggregate_indexed_slices_gradients(grads):
   """Aggregates gradients containing `IndexedSlices`s."""
   if len(grads) < 1:
     return None
-  elif len(grads) == 1:
+  if len(grads) == 1:
     return grads[0]
-  else:
-    grads = [g for g in grads if g is not None]
-    # If any gradient is a `Tensor`, sum them up and return a dense tensor
-    # object.
-    if any(isinstance(g, ops.Tensor) for g in grads):
-      return math_ops.add_n(grads)
+  grads = [g for g in grads if g is not None]
+  # If any gradient is a `Tensor`, sum them up and return a dense tensor
+  # object.
+  if any(isinstance(g, ops.Tensor) for g in grads):
+    return math_ops.add_n(grads)
 
-    # The following `_as_indexed_slices_list` casts ids of IndexedSlices into
-    # int64. It is to make sure the inputs of `concat` all have same the data
-    # type.
-    grads = math_ops._as_indexed_slices_list(grads)  # pylint: disable=protected-access
+  # The following `_as_indexed_slices_list` casts ids of IndexedSlices into
+  # int64. It is to make sure the inputs of `concat` all have same the data
+  # type.
+  grads = math_ops._as_indexed_slices_list(grads)  # pylint: disable=protected-access
 
-    grads = [flatten_nested_indexed_slices(x) for x in grads]
-    # Form IndexedSlices out of the concatenated values and indices.
-    concat_grad = ops.IndexedSlices(
-        array_ops.concat([x.values for x in grads], axis=0),
-        array_ops.concat([x.indices for x in grads], axis=0),
-        grads[0].dense_shape)
+  grads = [flatten_nested_indexed_slices(x) for x in grads]
+  # Form IndexedSlices out of the concatenated values and indices.
+  concat_grad = ops.IndexedSlices(
+      array_ops.concat([x.values for x in grads], axis=0),
+      array_ops.concat([x.indices for x in grads], axis=0),
+      grads[0].dense_shape)
 
-    return concat_grad
+  return concat_grad
 
 
 def _aggregate_grads(gradients):
@@ -609,12 +651,13 @@ def _num_elements(grad):
   """The number of elements in the `grad` tensor."""
   if isinstance(grad, ops.Tensor):
     shape_tuple = grad._shape_tuple()  # pylint: disable=protected-access
-    if shape_tuple is None or None in shape_tuple:
-      return 0
-    return functools.reduce(operator.mul, shape_tuple, 1)
-  if isinstance(grad, ops.IndexedSlices):
-    return functools.reduce(operator.mul, grad.values._shape_tuple(), 1)  # pylint: disable=protected-access
-  raise ValueError("`grad` not a Tensor or IndexedSlices.")
+  elif isinstance(grad, ops.IndexedSlices):
+    shape_tuple = grad.values._shape_tuple()  # pylint: disable=protected-access
+  else:
+    raise ValueError("`grad` not a Tensor or IndexedSlices.")
+  if shape_tuple is None or None in shape_tuple:
+    return 0
+  return functools.reduce(operator.mul, shape_tuple, 1)
 
 
 def _fast_fill(value, shape, dtype):
@@ -625,11 +668,8 @@ def _fast_fill(value, shape, dtype):
 
 def _zeros(shape, dtype):
   """Helper to return (possibly cached) zero tensors in eager mode."""
-  if (dtype == dtypes.variant
-      or dtype == dtypes.string
-      or dtype == dtypes.resource):
-    # TODO(apassos): need to save enough information about variant tensors to do
-    # a zeros
+  # Note: variants will use _zeros_like
+  if dtype == dtypes.string or dtype == dtypes.resource:
     return None
 
   ctx = context.context()
@@ -639,7 +679,7 @@ def _zeros(shape, dtype):
   device = ctx.device_name
 
   if tensor_util.is_tensor(shape):
-    shape_key = shape.experimental_ref()
+    shape_key = shape.ref()
   else:
     shape_key = shape
   cache_key = shape_key, dtype, device
@@ -677,18 +717,22 @@ _default_vspace = imperative_grad.VSpace(
     aggregate_fn=_aggregate_grads,
     zeros_fn=_zeros,
     ones_fn=_ones,
+    zeros_like_fn=default_gradient.zeros_like,
+    ones_like_fn=default_gradient.ones_like,
     graph_shape_fn=gen_array_ops.shape)
-pywrap_tensorflow.TFE_Py_RegisterVSpace(_default_vspace)
+pywrap_tfe.TFE_Py_RegisterVSpace(_default_vspace)
 
 
 def _handle_or_self(x):
-  """If x is ResourceVariable, return its handle, else x."""
+  """Unwrap resource variable/ndarray to return tensors."""
   if resource_variable_ops.is_resource_variable(x):
-    x = x.handle
+    return x.handle
+  if isinstance(x, np_arrays.ndarray):
+    return x.data
   return x
 
 
-@tf_export("GradientTape")
+@tf_export("GradientTape", "autodiff.GradientTape", v1=["GradientTape"])
 class GradientTape(object):
   """Record operations for automatic differentiation.
 
@@ -792,6 +836,7 @@ class GradientTape(object):
     self._tape = None
     self._persistent = persistent
     self._watch_accessed_variables = watch_accessed_variables
+    self._watched_variables = ()
     self._recording = False
     self._created_eagerly = context.executing_eagerly()
     if self._created_eagerly:
@@ -809,8 +854,10 @@ class GradientTape(object):
       self._pop_tape()
 
   def _push_tape(self):
+    """Pushes a new tape onto the tape stack."""
     if self._recording:
-      raise ValueError("Tape is already recording.")
+      raise ValueError("Tape is still recording, This can happen if you try to "
+                       "re-enter an already-active tape.")
     if self._tape is None:
       self._tape = tape.push_new_tape(
           persistent=self._persistent,
@@ -843,12 +890,11 @@ class GradientTape(object):
     Raises:
       ValueError: if it encounters something that is not a tensor.
     """
-    for t in nest.flatten(tensor):
-      if not (pywrap_tensorflow.IsTensor(t) or
-              pywrap_tensorflow.IsVariable(t)):
+    for t in nest.flatten(tensor, expand_composites=True):
+      if not (_pywrap_utils.IsTensor(t) or _pywrap_utils.IsVariable(t)):
         raise ValueError("Passed in object of type {}, not tf.Tensor".format(
             type(t)))
-      if not t.dtype.is_floating:
+      if not backprop_util.IsTrainable(t):
         logging.log_first_n(
             logging.WARN, "The dtype of the watched tensor must be "
             "floating (e.g. tf.float32), got %r", 5, t.dtype)
@@ -930,7 +976,9 @@ class GradientTape(object):
 
   def watched_variables(self):
     """Returns variables watched by this tape in order of construction."""
-    return self._tape.watched_variables()
+    if self._tape is not None:
+      self._watched_variables = self._tape.watched_variables()
+    return self._watched_variables
 
   def gradient(self,
                target,
@@ -980,9 +1028,10 @@ class GradientTape(object):
             "gradient in order to compute higher order "
             "derivatives.", 1)
 
+    num_ndarrays = 0
     flat_targets = []
     for t in nest.flatten(target):
-      if not t.dtype.is_floating:
+      if not backprop_util.IsTrainable(t):
         logging.vlog(
             logging.WARN, "The dtype of the target tensor must be "
             "floating (e.g. tf.float32) when calling GradientTape.gradient, "
@@ -990,17 +1039,26 @@ class GradientTape(object):
       if resource_variable_ops.is_resource_variable(t):
         with self:
           t = ops.convert_to_tensor(t)
+      elif isinstance(t, np_arrays.ndarray):
+        t = t.data
+        num_ndarrays += 1
       flat_targets.append(t)
+    # Only rewrap if all targets are ndarray. If not, prefer tensors.
+    rewrap_as_ndarray = num_ndarrays == len(flat_targets)
 
     flat_sources = nest.flatten(sources)
     flat_sources_raw = flat_sources
     flat_sources = [_handle_or_self(x) for x in flat_sources]
     for t in flat_sources_raw:
-      if not t.dtype.is_floating:
+      if not backprop_util.IsTrainable(t):
         logging.vlog(
             logging.WARN, "The dtype of the source tensor must be "
             "floating (e.g. tf.float32) when calling GradientTape.gradient, "
             "got %r", t.dtype)
+      if getattr(t, "is_packed", False):
+        raise ValueError(
+            "GradientTape.gradient is not supported on packed EagerTensors yet."
+        )
 
     if output_gradients is not None:
       output_gradients = [None if x is None else ops.convert_to_tensor(x)
@@ -1015,7 +1073,12 @@ class GradientTape(object):
         unconnected_gradients=unconnected_gradients)
 
     if not self._persistent:
+      # Keep track of watched variables before setting tape to None
+      self._watched_variables = self._tape.watched_variables()
       self._tape = None
+
+    if rewrap_as_ndarray:
+      flat_grad = nest.map_structure(np_arrays.tensor_to_ndarray, flat_grad)
 
     grad = nest.pack_sequence_as(sources, flat_grad)
     return grad
@@ -1071,6 +1134,10 @@ class GradientTape(object):
       ValueError: If vectorization of jacobian computation fails.
     """
     flat_sources = nest.flatten(sources)
+    rewrap_as_ndarray = False
+    if isinstance(target, np_arrays.ndarray):
+      target = target.data
+      rewrap_as_ndarray = True
     target_static_shape = target.shape
     target_shape = array_ops.shape(target)
     # Note that we push and pop the tape here and below. This is needed since we
@@ -1120,6 +1187,8 @@ class GradientTape(object):
         out = array_ops.reshape(out, new_shape)
         if context.executing_eagerly():
           out.set_shape(target_static_shape.concatenate(flat_sources[i].shape))
+      if rewrap_as_ndarray:
+        out = np_arrays.tensor_to_ndarray(out)
       output[i] = out
 
     return nest.pack_sequence_as(sources, output)

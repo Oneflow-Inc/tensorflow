@@ -17,8 +17,6 @@ cc_library(
     ],
 )
 
-tf_ops_fuzz_target_lib("identity")
-
 tf_ops_fuzz_target_lib("string_to_number")
 
 tf_oss_fuzz_corpus("string_to_number")
@@ -72,3 +70,7 @@ tf_ops_fuzz_target_lib("one_hot")
 tf_ops_fuzz_target_lib("scatter_nd")
 
 tf_oss_fuzz_corpus("scatter_nd")
+
+tf_ops_fuzz_target_lib("decode_csv")
+
+tf_oss_fuzz_corpus("decode_csv")

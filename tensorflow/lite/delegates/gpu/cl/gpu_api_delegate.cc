@@ -80,17 +80,17 @@ class Delegate {
       options_.compile_options.precision_loss_allowed = 0;
       options_.compile_options.inference_priority = TfLiteGpuInferencePriority::
           TFLITE_GPU_INFERENCE_PRIORITY_MAX_PRECISION;
-      options_.egl_display = eglGetCurrentDisplay();
-      options_.egl_context = eglGetCurrentContext();
+      options_.egl_display = EGL_NO_DISPLAY;
+      options_.egl_context = EGL_NO_CONTEXT;
       options_.serialized_binary_cache_data = nullptr;
       options_.serialized_binary_cache_size = 0;
     }
   }
 
-  Status Prepare(TfLiteContext* context,
-                 const TfLiteDelegateParams* delegate_params) {
+  absl::Status Prepare(TfLiteContext* context,
+                       const TfLiteDelegateParams* delegate_params) {
     // Extract TFLite delegate execution plan from the context and convert it
-    // into FlowGraph32.
+    // into GraphFloat32.
     GraphFloat32 graph;
     RETURN_IF_ERROR(BuildModel(context, delegate_params, &graph));
 
@@ -98,7 +98,7 @@ class Delegate {
     NullTransformationReporter reporter;
     ModelTransformer transformer(&graph, &reporter);
     if (!ApplyGeneralTransformations(&transformer)) {
-      return InternalError("Graph general transformations failed");
+      return absl::InternalError("Graph general transformations failed");
     }
 
     InferenceEnvironmentOptions env_options;
@@ -108,49 +108,100 @@ class Delegate {
         options_.serialized_binary_cache_data,
         options_.serialized_binary_cache_size};
     InferenceEnvironmentProperties properties;
-    Status status =
+    absl::Status status =
         NewInferenceEnvironment(env_options, &environment_, &properties);
     if (!properties.is_opencl_available) {
-      context->ReportError(context,
-                           "TfLiteGpuDelegate: OpenCL is not available");
+      TF_LITE_KERNEL_LOG(context, "TfLiteGpuDelegate: OpenCL is not available");
     }
     if (!properties.is_gl_sharing_supported) {
-      context->ReportError(context,
-                           "TfLiteGpuDelegate: GL sharing is not supported");
+      TF_LITE_KERNEL_LOG(context,
+                         "TfLiteGpuDelegate: GL sharing is not supported");
     }
     if (!properties.is_cl_to_gl_fast_sync_supported) {
-      context->ReportError(
+      TF_LITE_KERNEL_LOG(
           context, "TfLiteGpuDelegate: fast CL to GL sync is not supported");
     }
     if (!properties.is_gl_to_cl_fast_sync_supported) {
-      context->ReportError(
+      TF_LITE_KERNEL_LOG(
           context, "TfLiteGpuDelegate: fast GL to CL sync is not supported");
     }
     RETURN_IF_ERROR(status);
 
+    std::vector<uint32_t> input_refs;
+    {
+      const auto& inputs = graph.inputs();
+      input_refs.reserve(inputs.size());
+      for (auto input : inputs) {
+        input_refs.push_back(input->tensor.ref);
+      }
+    }
+    std::vector<uint32_t> output_refs;
+    {
+      const auto& outputs = graph.outputs();
+      output_refs.reserve(outputs.size());
+      for (auto output : outputs) {
+        output_refs.push_back(output->tensor.ref);
+      }
+    }
+
     InferenceOptions options;
-    options.priority = ToPriority(options_.compile_options.inference_priority);
-    options.allow_precision_loss =
-        options_.compile_options.precision_loss_allowed != 0;
+    options.usage = InferenceUsage::FAST_SINGLE_ANSWER;
+    if (options_.compile_options.precision_loss_allowed == 0) {
+      options.priority1 = InferencePriority::MAX_PRECISION;
+      switch (options_.compile_options.inference_priority) {
+        case TfLiteGpuInferencePriority::
+            TFLITE_GPU_INFERENCE_PRIORITY_MAX_PRECISION:
+          options.priority2 = InferencePriority::MIN_MEMORY_USAGE;
+          options.priority3 = InferencePriority::MIN_LATENCY;
+          break;
+        case TfLiteGpuInferencePriority::
+            TFLITE_GPU_INFERENCE_PRIORITY_MIN_LATENCY:
+          options.priority2 = InferencePriority::MIN_LATENCY;
+          options.priority3 = InferencePriority::MIN_MEMORY_USAGE;
+          break;
+        case TfLiteGpuInferencePriority::
+            TFLITE_GPU_INFERENCE_PRIORITY_MIN_MEMORY_USAGE:
+          options.priority2 = InferencePriority::MIN_MEMORY_USAGE;
+          options.priority3 = InferencePriority::MIN_LATENCY;
+          break;
+      }
+    } else {
+      switch (options_.compile_options.inference_priority) {
+        case TfLiteGpuInferencePriority::
+            TFLITE_GPU_INFERENCE_PRIORITY_MAX_PRECISION:
+          options.priority1 = InferencePriority::MIN_LATENCY;
+          options.priority2 = InferencePriority::MAX_PRECISION;
+          options.priority3 = InferencePriority::MIN_MEMORY_USAGE;
+          break;
+        case TfLiteGpuInferencePriority::
+            TFLITE_GPU_INFERENCE_PRIORITY_MIN_LATENCY:
+          options.priority1 = InferencePriority::MIN_LATENCY;
+          options.priority2 = InferencePriority::MIN_MEMORY_USAGE;
+          options.priority3 = InferencePriority::MAX_PRECISION;
+          break;
+        case TfLiteGpuInferencePriority::
+            TFLITE_GPU_INFERENCE_PRIORITY_MIN_MEMORY_USAGE:
+          options.priority1 = InferencePriority::MIN_MEMORY_USAGE;
+          options.priority2 = InferencePriority::MIN_LATENCY;
+          options.priority3 = InferencePriority::MAX_PRECISION;
+          break;
+      }
+    }
     std::unique_ptr<InferenceBuilder> builder;
     RETURN_IF_ERROR(
-        environment_->NewInferenceBuilder(options, graph, &builder));
+        environment_->NewInferenceBuilder(options, std::move(graph), &builder));
 
     // At this point tflite didn't allocate tensors yet, therefore, collect
     // indices and set all input and output tensors from tflite later.
-    auto inputs = graph.inputs();
-    input_indices_.reserve(inputs.size());
-    for (auto input : inputs) {
-      auto tensor_index = input->tensor.ref;
+    input_indices_.reserve(input_refs.size());
+    for (auto tensor_index : input_refs) {
       int object_index = input_indices_.size();
       input_indices_.push_back(tensor_index);
       RETURN_IF_ERROR(
           builder->SetInputObjectDef(object_index, GetObjectDef(tensor_index)));
     }
-    auto outputs = graph.outputs();
-    output_indices_.reserve(outputs.size());
-    for (auto output : outputs) {
-      auto tensor_index = output->tensor.ref;
+    output_indices_.reserve(output_refs.size());
+    for (auto tensor_index : output_refs) {
       int object_index = output_indices_.size();
       output_indices_.push_back(tensor_index);
       RETURN_IF_ERROR(builder->SetOutputObjectDef(object_index,
@@ -160,7 +211,7 @@ class Delegate {
     return builder->Build(&runner_);
   }
 
-  Status SetInputsAndOutputs(TfLiteContext* context) {
+  absl::Status SetInputsAndOutputs(TfLiteContext* context) {
     int i = 0;
     for (auto index : input_indices_) {
       RETURN_IF_ERROR(
@@ -171,10 +222,10 @@ class Delegate {
       RETURN_IF_ERROR(
           runner_->SetOutputObject(i++, GetTensorObject(index, context)));
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
-  Status Invoke(TfLiteContext* context) {
+  absl::Status Invoke(TfLiteContext* context) {
     RETURN_IF_ERROR(SetInputsAndOutputs(context));
     return runner_->Run();
   }
@@ -269,8 +320,8 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
         // for whatever reason forbids that.
         const auto status = gpu_delegate->Prepare(context, params);
         if (!status.ok()) {
-          context->ReportError(context, "TfLiteGpuDelegate Init: %s",
-                               status.error_message().c_str());
+          TF_LITE_KERNEL_LOG(context, "TfLiteGpuDelegate Init: %s",
+                             std::string(status.message()).c_str());
           return nullptr;
         }
         return gpu_delegate;
@@ -280,7 +331,7 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
       // .prepare
       [](TfLiteContext* context, TfLiteNode* node) -> TfLiteStatus {
         if (!node->user_data) {
-          context->ReportError(
+          TF_LITE_KERNEL_LOG(
               context,
               "TfLiteGpuDelegate Prepare: delegate is not initialized");
           return kTfLiteError;
@@ -294,8 +345,8 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
       [](TfLiteContext* context, TfLiteNode* node) -> TfLiteStatus {
         const auto status = GetDelegate(node)->Invoke(context);
         if (!status.ok()) {
-          context->ReportError(context, "TfLiteGpuDelegate Invoke: %s",
-                               status.error_message().c_str());
+          TF_LITE_KERNEL_LOG(context, "TfLiteGpuDelegate Invoke: %s",
+                             std::string(status.message()).c_str());
           return kTfLiteError;
         }
         return kTfLiteOk;

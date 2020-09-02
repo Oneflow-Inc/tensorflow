@@ -12,12 +12,18 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <stdint.h>
+
+#include <initializer_list>
+#include <string>
+#include <vector>
+
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/interpreter.h"
-#include "tensorflow/lite/kernels/register.h"
+#include "flatbuffers/flatbuffers.h"  // from @flatbuffers
 #include "tensorflow/lite/kernels/test_util.h"
-#include "tensorflow/lite/model.h"
+#include "tensorflow/lite/schema/schema_generated.h"
+#include "tensorflow/lite/string_type.h"
 
 namespace tflite {
 namespace {
@@ -294,5 +300,16 @@ TEST(GatherOpTest, SimpleString) {
   ASSERT_THAT(m.GetOutputShape(), ElementsAreArray({2}));
   EXPECT_THAT(m.GetStringOutput(), ElementsAreArray({"A", "C"}));
 }
+
+TEST(GatherOpTest, 2DIndexString) {
+  GatherOpModel m({TensorType_STRING, {3}}, {TensorType_INT32, {2, 3}});
+  m.SetStringInput({"A", "B", "C"});
+  m.SetPositions<int32_t>({0, 2, 1, 1, 0, 2});
+  m.Invoke();
+  ASSERT_THAT(m.GetOutputShape(), ElementsAreArray({2, 3}));
+  EXPECT_THAT(m.GetStringOutput(),
+              ElementsAreArray({"A", "C", "B", "B", "A", "C"}));
+}
+
 }  // namespace
 }  // namespace tflite

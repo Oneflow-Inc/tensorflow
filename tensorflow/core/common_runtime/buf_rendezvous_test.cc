@@ -14,6 +14,8 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/common_runtime/buf_rendezvous.h"
 
+#include "tensorflow/core/common_runtime/device.h"
+#include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/notification.h"
@@ -47,7 +49,7 @@ class BufRendezvousTest : public ::testing::Test {
                         const uint64 incarnation) {
     std::vector<std::unique_ptr<Device>> devices;
     devices.push_back(NewDevice(device, type, incarnation));
-    dev_mgr_ = absl::make_unique<DeviceMgr>(std::move(devices));
+    dev_mgr_ = absl::make_unique<StaticDeviceMgr>(std::move(devices));
     br_ = absl::make_unique<BufRendezvous>(123, dev_mgr_.get());
   }
 

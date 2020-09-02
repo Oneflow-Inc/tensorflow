@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #define EIGEN_USE_GPU
 
 #include "tensorflow/core/framework/register_types.h"
@@ -33,14 +33,12 @@ namespace tensorflow {
   DECLARE_GPU_SPECS_NDIM(T, 5); \
   DECLARE_GPU_SPECS_NDIM(T, 6);
 
-TF_CALL_float(DECLARE_GPU_SPECS);
-TF_CALL_double(DECLARE_GPU_SPECS);
-TF_CALL_complex64(DECLARE_GPU_SPECS);
-TF_CALL_complex128(DECLARE_GPU_SPECS);
+TF_CALL_GPU_NUMBER_TYPES(DECLARE_GPU_SPECS);
+TF_CALL_COMPLEX_TYPES(DECLARE_GPU_SPECS);
 
 #undef DECLARE_GPU_SPECS_NDIM
 #undef DECLARE_GPU_SPECS
 
 }  // namespace tensorflow
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM

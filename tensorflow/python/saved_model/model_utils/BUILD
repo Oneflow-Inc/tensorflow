@@ -50,7 +50,7 @@ py_library(
 py_test(
     name = "export_output_test",
     srcs = ["export_output_test.py"],
-    python_version = "PY2",
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":export_output",
@@ -62,7 +62,6 @@ py_test(
         "//tensorflow/python:dtypes",
         "//tensorflow/python:framework_ops",
         "//tensorflow/python:sparse_tensor",
-        "//tensorflow/python/keras",
         "//tensorflow/python/saved_model:signature_constants",
     ],
 )
@@ -85,7 +84,7 @@ py_library(
 py_test(
     name = "export_test",
     srcs = ["export_test.py"],
-    python_version = "PY2",
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":export_utils",
@@ -97,7 +96,6 @@ py_test(
         "//tensorflow/python:framework_ops",
         "//tensorflow/python:framework_test_lib",
         "//tensorflow/python:sparse_tensor",
-        "//tensorflow/python/keras",
         "//tensorflow/python/saved_model:signature_constants",
         "//tensorflow/python/saved_model:signature_def_utils",
     ],
@@ -112,7 +110,7 @@ py_library(
 py_test(
     name = "mode_keys_test",
     srcs = ["mode_keys_test.py"],
-    python_version = "PY2",
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         ":mode_keys",

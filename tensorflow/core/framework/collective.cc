@@ -90,9 +90,10 @@ CollInstanceParams& CollInstanceParams::operator=(
 }
 
 string CollInstanceParams::ToString() const {
-  string v = strings::StrCat("CollInstanceParams { instance_key=", instance_key,
-                             " type=", type, " data_type=", data_type,
-                             " shape=", shape.DebugString(), " devices {");
+  string v =
+      strings::StrCat("CollInstanceParams { instance_key=", instance_key,
+                      " type=", type, " data_type=", DataTypeString(data_type),
+                      " shape=", shape.DebugString(), " devices {");
   for (const auto& d : device_names) {
     strings::StrAppend(&v, d, ",");
   }
@@ -101,7 +102,7 @@ string CollInstanceParams::ToString() const {
     strings::StrAppend(&v, n, ", ");
   }
   strings::StrAppend(&v, "} num_devices_per_task={");
-  for (const auto dpt : num_devices_per_task) {
+  for (const auto& dpt : num_devices_per_task) {
     strings::StrAppend(&v, dpt.first, ": ", dpt.second, ", ");
   }
   strings::StrAppend(&v, "}, collective_name=", impl_details.collective_name,

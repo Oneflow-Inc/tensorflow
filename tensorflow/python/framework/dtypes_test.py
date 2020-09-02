@@ -21,6 +21,7 @@ from __future__ import print_function
 import numpy as np
 
 from tensorflow.core.framework import types_pb2
+from tensorflow.python import _dtypes
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import test_util
 from tensorflow.python.platform import googletest
@@ -64,6 +65,13 @@ class TypesTest(test_util.TensorFlowTestCase):
             dtypes.as_dtype(datatype_enum).base_dtype,
             dtypes.as_dtype(numpy_dtype))
 
+  def testAllPybind11DTypeConvertibleToDType(self):
+    for datatype_enum in types_pb2.DataType.values():
+      if datatype_enum == types_pb2.DT_INVALID:
+        continue
+      dtype = _dtypes.DType(datatype_enum)
+      self.assertEqual(dtypes.as_dtype(datatype_enum), dtype)
+
   def testInvalid(self):
     with self.assertRaises(TypeError):
       dtypes.DType(types_pb2.DT_INVALID)
@@ -87,6 +95,16 @@ class TypesTest(test_util.TensorFlowTestCase):
     self.assertIs(dtypes.bool, dtypes.as_dtype(np.bool_))
     with self.assertRaises(TypeError):
       dtypes.as_dtype(np.dtype([("f1", np.uint), ("f2", np.int32)]))
+
+    class AnObject(object):
+      dtype = "f4"
+
+    self.assertIs(dtypes.float32, dtypes.as_dtype(AnObject))
+
+    class AnotherObject(object):
+      dtype = np.dtype(np.complex64)
+
+    self.assertIs(dtypes.complex64, dtypes.as_dtype(AnotherObject))
 
   def testRealDtype(self):
     for dtype in [
@@ -281,6 +299,7 @@ class TypesTest(test_util.TensorFlowTestCase):
         self.assertEquals(dtype.max, float.fromhex("0x1.FEp127"))
 
   def testRepr(self):
+    self.skipTest("b/142725777")
     for enum, name in dtypes._TYPE_TO_STRING.items():
       if enum > 100:
         continue
@@ -306,16 +325,19 @@ class TypesTest(test_util.TensorFlowTestCase):
     for enum in dtypes._TYPE_TO_STRING:
       dtype = dtypes.DType(enum)
       ctor, args = dtype.__reduce__()
-      self.assertEquals(ctor, dtypes.as_dtype)
-      self.assertEquals(args, (dtype.name,))
+      self.assertEqual(ctor, dtypes.as_dtype)
+      self.assertEqual(args, (dtype.name,))
       reconstructed = ctor(*args)
-      self.assertEquals(reconstructed, dtype)
+      self.assertEqual(reconstructed, dtype)
 
   def testAsDtypeInvalidArgument(self):
     with self.assertRaises(TypeError):
       dtypes.as_dtype((dtypes.int32, dtypes.float32))
 
+  def testAsDtypeReturnsInternedVersion(self):
+    dt = dtypes.DType(types_pb2.DT_VARIANT)
+    self.assertIs(dtypes.as_dtype(dt), dtypes.variant)
+
 
 if __name__ == "__main__":
   googletest.main()
-

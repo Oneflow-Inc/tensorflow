@@ -27,45 +27,42 @@ namespace cl {
 namespace {
 
 std::string GetSoftmaxKernelCode(
-    const TensorDescriptor& src_descriptor,
-    const TensorDescriptor& dst_descriptor, CalculationsPrecision precision,
-    const std::vector<ElementwiseOperation*>& linked_operations) {
-  TensorCodeGenerator src_tensor("src_data", "size", src_descriptor);
-  TensorCodeGenerator dst_tensor("dst_data", "size", dst_descriptor);
+    const OperationDef& op_def,
+    Arguments* args) {
+  auto src_desc = absl::make_unique<TensorDescriptor>(op_def.src_tensors[0]);
+  if (op_def.IsBatchSupported()) {
+    src_desc->SetStateVar("BatchedWidth", "true");
+  }
+  args->AddObjectRef("src_tensor", AccessType::READ, std::move(src_desc));
+  auto dst_desc = absl::make_unique<TensorDescriptor>(op_def.dst_tensors[0]);
+  if (op_def.IsBatchSupported()) {
+    dst_desc->SetStateVar("BatchedWidth", "true");
+  }
+  args->AddObjectRef("dst_tensor", AccessType::WRITE, std::move(dst_desc));
 
-  std::string code = GetCommonDefines(precision);
-  code += "__kernel void main_function(\n";
-  code += src_tensor.GetDeclaration(AccessType::READ);
-  code += GetArgsDeclaration(linked_operations);
-  code += dst_tensor.GetDeclaration(AccessType::WRITE) + ",\n";
-  code += "    int4 size,\n";
-  code += "    float4 mask\n";
-  code += ") {\n";
-  code += "  int X = get_global_id(0);\n";
-  code += "  int Y = get_global_id(1);\n";
-  code += "  if (X >= size.x || Y >= size.y) { \n";
-  code += "    return; \n";
-  code += "  } \n";
-  code += "  float sum = 0.0f;\n";
-  code += "  for (int d = 0; d < size.w - 1; ++d) {\n";
-  code += "    float4 t = " + src_tensor.ReadAsFloat3D("X", "Y", "d") + ";\n";
-  code += "    sum += dot((float4)(1.0f), exp(t));\n";
-  code += "  }\n";
-  code += "  {\n";
-  code += "    float4 t = " + src_tensor.ReadAsFloat3D("X", "Y", "size.w - 1") +
-          ";\n";
-  code += "    sum += dot(mask, exp(t));\n";
-  code += "  }\n";
-  code += "  for (int d = 0; d < size.w; ++d) {\n";
-  code += "    " + src_tensor.GetAddress("address", "X", "Y", "d") + "\n";
-  code += "    float4 t = " + src_tensor.ReadAsFloat3D("address") + ";\n";
-  code += "    t = exp(t) / sum;\n";
-  code += "    FLT4 result = TO_FLT4(t);\n";
-  code += PostProcess(linked_operations, "result", "d", "address");
-  code += "    " + dst_tensor.Write3D("result", "address");
-  code += "  }\n";
-  code += "}\n";
-  return code;
+  std::string c = GetCommonDefines(op_def.precision);
+  c += "__kernel void main_function(\n";
+  c += "$0) {\n";
+  c += "  int X = get_global_id(0);\n";
+  c += "  int Y = get_global_id(1);\n";
+  c += "  if (X >= args.dst_tensor.Width() || Y >= args.dst_tensor.Height()) "
+       "return; \n";
+  c += "  float sum = 0.0f;\n";
+  c += "  for (int d = 0; d < args.dst_tensor.Slices(); ++d) {\n";
+  c += "    float4 t = args.src_tensor.Read<float>(X, Y, d);\n";
+  c += "    sum += exp(t.x);\n";
+  c += "    if (d * 4 + 1 < args.dst_tensor.Channels()) sum += exp(t.y);\n";
+  c += "    if (d * 4 + 2 < args.dst_tensor.Channels()) sum += exp(t.z);\n";
+  c += "    if (d * 4 + 3 < args.dst_tensor.Channels()) sum += exp(t.w);\n";
+  c += "  }\n";
+  c += "  for (int d = 0; d < args.dst_tensor.Slices(); ++d) {\n";
+  c += "    float4 t = args.src_tensor.Read<float>(X, Y, d);\n";
+  c += "    t = exp(t) / sum;\n";
+  c += "    FLT4 result = TO_FLT4(t);\n";
+  c += "    args.dst_tensor.Write(result, X, Y, d);\n";
+  c += "  }\n";
+  c += "}\n";
+  return c;
 }
 }  // namespace
 
@@ -83,39 +80,39 @@ Softmax& Softmax::operator=(Softmax&& kernel) {
   return *this;
 }
 
-Status Softmax::Compile(const CreationContext& creation_context) {
-  const auto code = GetSoftmaxKernelCode(
-      definition_.src_tensors[0], definition_.dst_tensors[0],
-      definition_.precision, linked_operations_);
+absl::Status Softmax::Compile(const CreationContext& creation_context) {
+  std::string code = GetSoftmaxKernelCode(definition_, &args_);
+  std::string element_wise_code;
+  RETURN_IF_ERROR(
+      MergeOperations(linked_operations_, &args_, &element_wise_code));
+  RETURN_IF_ERROR(args_.TransformToCLCode(creation_context.device->GetInfo(),
+                                          {{"dst_tensor", element_wise_code}},
+                                          &code));
   return creation_context.cache->GetOrCreateCLKernel(
       code, "main_function", *creation_context.context,
       *creation_context.device, &kernel_);
 }
 
-Status Softmax::BindArguments() {
-  kernel_.ResetBindingCounter();
-  RETURN_IF_ERROR(kernel_.SetMemoryAuto(src_[0]->GetMemoryPtr()));
-  RETURN_IF_ERROR(BindArgs(&kernel_, linked_operations_));
-  RETURN_IF_ERROR(kernel_.SetMemoryAuto(dst_[0]->GetMemoryPtr()));
-  RETURN_IF_ERROR(kernel_.SetBytesAuto(src_[0]->GetSizeWithDepth()));
-  RETURN_IF_ERROR(
-      kernel_.SetBytesAuto(GetMaskForLastPlane(src_[0]->Channels())));
-  return OkStatus();
+absl::Status Softmax::BindArguments() {
+  RETURN_IF_ERROR(args_.SetObjectRef("src_tensor", src_[0]));
+  RETURN_IF_ERROR(args_.SetObjectRef("dst_tensor", dst_[0]));
+  RETURN_IF_ERROR(SetArguments(linked_operations_, &args_));
+  return args_.Bind(kernel_.kernel());
 }
 
 int3 Softmax::GetGridSize() const {
-  const int grid_x = dst_[0]->Width();
+  const int grid_x = dst_[0]->Width() * dst_[0]->Batch();
   const int grid_y = dst_[0]->Height();
   const int grid_z = 1;
   return int3(grid_x, grid_y, grid_z);
 }
 
-Status Softmax::Tune(const TuningParameters& params) {
+absl::Status Softmax::Tune(const TuningParameters& params) {
   RETURN_IF_ERROR(BindArguments());
   return GetBestWorkGroup(params, kernel_, GetGridSize(), &work_group_size_);
 }
 
-Status Softmax::AddToQueue(CLCommandQueue* queue) {
+absl::Status Softmax::AddToQueue(CLCommandQueue* queue) {
   RETURN_IF_ERROR(BindArguments());
   return queue->DispatchImplicit(kernel_, GetGridSize(), work_group_size_);
 }

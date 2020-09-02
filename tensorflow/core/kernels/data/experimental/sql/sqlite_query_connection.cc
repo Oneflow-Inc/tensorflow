@@ -69,7 +69,7 @@ Status SqliteQueryConnection::GetNext(IteratorContext* ctx,
 Status SqliteQueryConnection::PrepareQuery() {
   TF_RETURN_IF_ERROR(db_->Prepare(query_, &stmt_));
   int column_count = stmt_.ColumnCount();
-  if (column_count != output_types_.size()) {
+  if (column_count != static_cast<int>(output_types_.size())) {
     stmt_ = SqliteStatement();
     return errors::InvalidArgument(tensorflow::strings::Printf(
         "The number of columns in query (%d) must match the number of "
@@ -101,7 +101,7 @@ void SqliteQueryConnection::FillTensorWithResultSetEntry(
     TF_CALL_uint64(INT_CASE)
     TF_CALL_float(DOUBLE_CASE)
     TF_CALL_double(DOUBLE_CASE)
-    TF_CALL_string(STRING_CASE)
+    TF_CALL_tstring(STRING_CASE)
     case DT_BOOL:
       tensor->scalar<bool>()() = stmt_.ColumnInt(column_index) != 0;
       break;

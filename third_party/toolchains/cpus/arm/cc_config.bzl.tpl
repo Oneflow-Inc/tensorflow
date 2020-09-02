@@ -18,6 +18,8 @@ load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 def _impl(ctx):
     if (ctx.attr.cpu == "armeabi"):
         toolchain_identifier = "arm-linux-gnueabihf"
+    elif (ctx.attr.cpu == "aarch64"):
+        toolchain_identifier = "aarch64-linux-gnu"
     elif (ctx.attr.cpu == "local"):
         toolchain_identifier = "local_linux"
     else:
@@ -25,6 +27,8 @@ def _impl(ctx):
 
     if (ctx.attr.cpu == "armeabi"):
         host_system_name = "armeabi"
+    elif (ctx.attr.cpu == "aarch64"):
+        host_system_name = "aarch64"
     elif (ctx.attr.cpu == "local"):
         host_system_name = "local"
     else:
@@ -32,6 +36,8 @@ def _impl(ctx):
 
     if (ctx.attr.cpu == "armeabi"):
         target_system_name = "armeabi"
+    elif (ctx.attr.cpu == "aarch64"):
+        target_system_name = "aarch64"
     elif (ctx.attr.cpu == "local"):
         target_system_name = "local"
     else:
@@ -39,6 +45,8 @@ def _impl(ctx):
 
     if (ctx.attr.cpu == "armeabi"):
         target_cpu = "armeabi"
+    elif (ctx.attr.cpu == "aarch64"):
+        target_cpu = "aarch64"
     elif (ctx.attr.cpu == "local"):
         target_cpu = "local"
     else:
@@ -46,6 +54,8 @@ def _impl(ctx):
 
     if (ctx.attr.cpu == "armeabi"):
         target_libc = "armeabi"
+    elif (ctx.attr.cpu == "aarch64"):
+        target_libc = "aarch64"
     elif (ctx.attr.cpu == "local"):
         target_libc = "local"
     else:
@@ -55,6 +65,8 @@ def _impl(ctx):
 
     if (ctx.attr.cpu == "armeabi"):
         abi_version = "armeabi"
+    elif (ctx.attr.cpu == "aarch64"):
+        abi_version = "aarch64"
     elif (ctx.attr.cpu == "local"):
         abi_version = "local"
     else:
@@ -62,6 +74,8 @@ def _impl(ctx):
 
     if (ctx.attr.cpu == "armeabi"):
         abi_libc_version = "armeabi"
+    elif (ctx.attr.cpu == "aarch64"):
+        abi_libc_version = "aarch64"
     elif (ctx.attr.cpu == "local"):
         abi_libc_version = "local"
     else:
@@ -127,6 +141,8 @@ def _impl(ctx):
 
     if (ctx.attr.cpu == "armeabi"):
         action_configs = []
+    elif (ctx.attr.cpu == "aarch64"):
+        action_configs = []
     elif (ctx.attr.cpu == "local"):
         action_configs = [objcopy_embed_data_action]
     else:
@@ -165,7 +181,7 @@ def _impl(ctx):
         ],
     )
 
-    if (ctx.attr.cpu == "armeabi"):
+    if (ctx.attr.cpu == "armeabi" or ctx.attr.cpu == "aarch64"):
         unfiltered_compile_flags_feature = feature(
             name = "unfiltered_compile_flags",
             enabled = True,
@@ -331,17 +347,116 @@ def _impl(ctx):
                             flags = [
                                 "-std=c++11",
                                 "-isystem",
-                                "%{ARM_COMPILER_PATH}%/arm-linux-gnueabihf/include/c++/4.9.3/",
+                                "%{ARM_COMPILER_PATH}%/lib/gcc/arm-rpi-linux-gnueabihf/6.5.0/include",
                                 "-isystem",
-                                "%{ARM_COMPILER_PATH}%/arm-linux-gnueabihf/sysroot/usr/include/",
+                                "%{ARM_COMPILER_PATH}%/lib/gcc/arm-rpi-linux-gnueabihf/6.5.0/include-fixed",
                                 "-isystem",
-                                "%{ARM_COMPILER_PATH}%/arm-linux-gnueabihf/libc/usr/include/",
+                                "%{ARM_COMPILER_PATH}%/arm-rpi-linux-gnueabihf/include/c++/6.5.0/",
                                 "-isystem",
-                                "%{ARM_COMPILER_PATH}%/lib/gcc/arm-linux-gnueabihf/4.9.3/include",
+                                "%{ARM_COMPILER_PATH}%/arm-rpi-linux-gnueabihf/sysroot/usr/include/",
                                 "-isystem",
-                                "%{ARM_COMPILER_PATH}%/lib/gcc/arm-linux-gnueabihf/4.9.3/include-fixed",
+                                "%{PYTHON_INCLUDE_PATH}%",
                                 "-isystem",
-                                "%{ARM_COMPILER_PATH}%/local_include",
+                                "/usr/include/",
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        )
+    elif (ctx.attr.cpu == "aarch64"):
+        default_compile_flags_feature = feature(
+            name = "default_compile_flags",
+            enabled = True,
+            flag_sets = [
+                flag_set(
+                    actions = [
+                        ACTION_NAMES.assemble,
+                        ACTION_NAMES.preprocess_assemble,
+                        ACTION_NAMES.linkstamp_compile,
+                        ACTION_NAMES.c_compile,
+                        ACTION_NAMES.cpp_compile,
+                        ACTION_NAMES.cpp_header_parsing,
+                        ACTION_NAMES.cpp_module_compile,
+                        ACTION_NAMES.cpp_module_codegen,
+                        ACTION_NAMES.lto_backend,
+                        ACTION_NAMES.clif_match,
+                    ],
+                    flag_groups = [
+                        flag_group(
+                            flags = [
+                                "-U_FORTIFY_SOURCE",
+                                "-D_FORTIFY_SOURCE=1",
+                                "-fstack-protector",
+                                "-DRASPBERRY_PI",
+                            ],
+                        ),
+                    ],
+                ),
+                flag_set(
+                    actions = [
+                        ACTION_NAMES.assemble,
+                        ACTION_NAMES.preprocess_assemble,
+                        ACTION_NAMES.linkstamp_compile,
+                        ACTION_NAMES.c_compile,
+                        ACTION_NAMES.cpp_compile,
+                        ACTION_NAMES.cpp_header_parsing,
+                        ACTION_NAMES.cpp_module_compile,
+                        ACTION_NAMES.cpp_module_codegen,
+                        ACTION_NAMES.lto_backend,
+                        ACTION_NAMES.clif_match,
+                    ],
+                    flag_groups = [flag_group(flags = ["-g"])],
+                    with_features = [with_feature_set(features = ["dbg"])],
+                ),
+                flag_set(
+                    actions = [
+                        ACTION_NAMES.assemble,
+                        ACTION_NAMES.preprocess_assemble,
+                        ACTION_NAMES.linkstamp_compile,
+                        ACTION_NAMES.c_compile,
+                        ACTION_NAMES.cpp_compile,
+                        ACTION_NAMES.cpp_header_parsing,
+                        ACTION_NAMES.cpp_module_compile,
+                        ACTION_NAMES.cpp_module_codegen,
+                        ACTION_NAMES.lto_backend,
+                        ACTION_NAMES.clif_match,
+                    ],
+                    flag_groups = [
+                        flag_group(
+                            flags = [
+                                "-g0",
+                                "-O2",
+                                "-DNDEBUG",
+                                "-ffunction-sections",
+                                "-fdata-sections",
+                            ],
+                        ),
+                    ],
+                    with_features = [with_feature_set(features = ["opt"])],
+                ),
+                flag_set(
+                    actions = [
+                        ACTION_NAMES.linkstamp_compile,
+                        ACTION_NAMES.cpp_compile,
+                        ACTION_NAMES.cpp_header_parsing,
+                        ACTION_NAMES.cpp_module_compile,
+                        ACTION_NAMES.cpp_module_codegen,
+                        ACTION_NAMES.lto_backend,
+                        ACTION_NAMES.clif_match,
+                    ],
+                    flag_groups = [
+                        flag_group(
+                            flags = [
+                                "-std=c++11",
+                                "-isystem",
+                                "%{AARCH64_COMPILER_PATH}%/aarch64-none-linux-gnu/include/c++/9.2.1/",
+                                "-isystem",
+                                "%{AARCH64_COMPILER_PATH}%/lib/gcc/aarch64-none-linux-gnu/9.2.1/include",
+                                "-isystem",
+                                "%{AARCH64_COMPILER_PATH}%/lib/gcc/aarch64-none-linux-gnu/9.2.1/include-fixed",
+                                "-isystem",
+                                "%{AARCH64_COMPILER_PATH}%/aarch64-none-linux-gnu/libc/usr/include/",
                                 "-isystem",
                                 "%{PYTHON_INCLUDE_PATH}%",
                                 "-isystem",
@@ -471,7 +586,7 @@ def _impl(ctx):
                 ),
             ],
         )
-    elif (ctx.attr.cpu == "armeabi"):
+    elif (ctx.attr.cpu == "armeabi" or ctx.attr.cpu == "aarch64"):
         default_link_flags_feature = feature(
             name = "default_link_flags",
             enabled = True,
@@ -546,7 +661,7 @@ def _impl(ctx):
                 sysroot_feature,
                 unfiltered_compile_flags_feature,
             ]
-    elif (ctx.attr.cpu == "armeabi"):
+    elif (ctx.attr.cpu == "armeabi" or ctx.attr.cpu == "aarch64"):
         features = [
                 default_compile_flags_feature,
                 default_link_flags_feature,
@@ -563,12 +678,19 @@ def _impl(ctx):
 
     if (ctx.attr.cpu == "armeabi"):
         cxx_builtin_include_directories = [
-                "%{ARM_COMPILER_PATH}%/arm-linux-gnueabihf/include/c++/4.9.3/",
-                "%{ARM_COMPILER_PATH}%/arm-linux-gnueabihf/sysroot/usr/include/",
-                "%{ARM_COMPILER_PATH}%/arm-linux-gnueabihf/libc/usr/include/",
-                "%{ARM_COMPILER_PATH}%/lib/gcc/arm-linux-gnueabihf/4.9.3/include",
-                "%{ARM_COMPILER_PATH}%/lib/gcc/arm-linux-gnueabihf/4.9.3/include-fixed",
-                "%{ARM_COMPILER_PATH}%/local_include",
+                "%{ARM_COMPILER_PATH}%/lib/gcc/arm-rpi-linux-gnueabihf/6.5.0/include",
+                "%{ARM_COMPILER_PATH}%/lib/gcc/arm-rpi-linux-gnueabihf/6.5.0/include-fixed",
+                "%{ARM_COMPILER_PATH}%/arm-rpi-linux-gnueabihf/sysroot/usr/include/",
+		"%{ARM_COMPILER_PATH}%/arm-rpi-linux-gnueabihf/include/c++/6.5.0/",
+                "/usr/include",
+                "/tmp/openblas_install/include/",
+            ]
+    elif (ctx.attr.cpu == "aarch64"):
+        cxx_builtin_include_directories = [
+                "%{AARCH64_COMPILER_PATH}%/aarch64-none-linux-gnu/include/c++/9.2.1/",
+                "%{AARCH64_COMPILER_PATH}%/lib/gcc/aarch64-none-linux-gnu/9.2.1/include",
+                "%{AARCH64_COMPILER_PATH}%/lib/gcc/aarch64-none-linux-gnu/9.2.1/include-fixed",
+                "%{AARCH64_COMPILER_PATH}%/aarch64-none-linux-gnu/libc/usr/include/",
                 "/usr/include",
                 "/tmp/openblas_install/include/",
             ]
@@ -585,44 +707,88 @@ def _impl(ctx):
         tool_paths = [
             tool_path(
                 name = "ar",
-                path = "%{ARM_COMPILER_PATH}%/bin/arm-linux-gnueabihf-ar",
+                path = "%{ARM_COMPILER_PATH}%/bin/arm-rpi-linux-gnueabihf-ar",
             ),
             tool_path(name = "compat-ld", path = "/bin/false"),
             tool_path(
                 name = "cpp",
-                path = "%{ARM_COMPILER_PATH}%/bin/arm-linux-gnueabihf-cpp",
+                path = "%{ARM_COMPILER_PATH}%/bin/arm-rpi-linux-gnueabihf-cpp",
             ),
             tool_path(
                 name = "dwp",
-                path = "%{ARM_COMPILER_PATH}%/bin/arm-linux-gnueabihf-dwp",
+                path = "%{ARM_COMPILER_PATH}%/bin/arm-rpi-linux-gnueabihf-dwp",
             ),
             tool_path(
                 name = "gcc",
-                path = "%{ARM_COMPILER_PATH}%/bin/arm-linux-gnueabihf-gcc",
+                path = "%{ARM_COMPILER_PATH}%/bin/arm-rpi-linux-gnueabihf-gcc",
             ),
             tool_path(
                 name = "gcov",
-                path = "%{ARM_COMPILER_PATH}%/bin/arm-linux-gnueabihf-gcov",
+                path = "%{ARM_COMPILER_PATH}%/bin/arm-rpi-linux-gnueabihf-gcov",
             ),
             tool_path(
                 name = "ld",
-                path = "%{ARM_COMPILER_PATH}%/bin/arm-linux-gnueabihf-ld",
+                path = "%{ARM_COMPILER_PATH}%/bin/arm-rpi-linux-gnueabihf-ld",
             ),
             tool_path(
                 name = "nm",
-                path = "%{ARM_COMPILER_PATH}%/bin/arm-linux-gnueabihf-nm",
+                path = "%{ARM_COMPILER_PATH}%/bin/arm-rpi-linux-gnueabihf-nm",
             ),
             tool_path(
                 name = "objcopy",
-                path = "%{ARM_COMPILER_PATH}%/bin/arm-linux-gnueabihf-objcopy",
+                path = "%{ARM_COMPILER_PATH}%/bin/arm-rpi-linux-gnueabihf-objcopy",
             ),
             tool_path(
                 name = "objdump",
-                path = "%{ARM_COMPILER_PATH}%/bin/arm-linux-gnueabihf-objdump",
+                path = "%{ARM_COMPILER_PATH}%/bin/arm-rpi-linux-gnueabihf-objdump",
             ),
             tool_path(
                 name = "strip",
-                path = "%{ARM_COMPILER_PATH}%/bin/arm-linux-gnueabihf-strip",
+                path = "%{ARM_COMPILER_PATH}%/bin/arm-rpi-linux-gnueabihf-strip",
+            ),
+        ]
+    elif (ctx.attr.cpu == "aarch64"):
+        tool_paths = [
+            tool_path(
+                name = "ar",
+                path = "%{AARCH64_COMPILER_PATH}%/bin/aarch64-none-linux-gnu-ar",
+            ),
+            tool_path(name = "compat-ld", path = "/bin/false"),
+            tool_path(
+                name = "cpp",
+                path = "%{AARCH64_COMPILER_PATH}%/bin/aarch64-none-linux-gnu-cpp",
+            ),
+            tool_path(
+                name = "dwp",
+                path = "%{AARCH64_COMPILER_PATH}%/bin/aarch64-none-linux-gnu-dwp",
+            ),
+            tool_path(
+                name = "gcc",
+                path = "%{AARCH64_COMPILER_PATH}%/bin/aarch64-none-linux-gnu-gcc",
+            ),
+            tool_path(
+                name = "gcov",
+                path = "%{AARCH64_COMPILER_PATH}%/bin/aarch64-none-linux-gnu-gcov",
+            ),
+            tool_path(
+                name = "ld",
+                path = "%{AARCH64_COMPILER_PATH}%/bin/aarch64-none-linux-gnu-ld",
+            ),
+            tool_path(
+                name = "nm",
+                path = "%{AARCH64_COMPILER_PATH}%/bin/aarch64-none-linux-gnu-nm",
+            ),
+            tool_path(
+                name = "objcopy",
+                path = "%{AARCH64_COMPILER_PATH}%/bin/aarch64-none-linux-gnu-objcopy",
+            ),
+            tool_path(
+                name = "objdump",
+                path = "%{AARCH64_COMPILER_PATH}%/bin/aarch64-none-linux-gnu-objdump",
+            ),
+            tool_path(
+                name = "strip",
+                path = "%{AARCH64_COMPILER_PATH}%/bin/aarch64-none-linux-gnu-strip",
             ),
         ]
     elif (ctx.attr.cpu == "local"):
@@ -672,7 +838,7 @@ def _impl(ctx):
 cc_toolchain_config =  rule(
     implementation = _impl,
     attrs = {
-        "cpu": attr.string(mandatory=True, values=["armeabi", "local"]),
+        "cpu": attr.string(mandatory=True, values=["armeabi", "aarch64", "local"]),
     },
     provides = [CcToolchainConfigInfo],
     executable = True,

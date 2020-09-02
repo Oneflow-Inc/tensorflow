@@ -28,32 +28,23 @@ limitations under the License.
 
 namespace tensorflow {
 
-namespace {
-std::map<int, OptionalTensor> GetVariables(OpKernelContext* ctx) {
-  std::map<int, OptionalTensor> variables;
-  for (int64 i = 0; i < ctx->num_inputs(); ++i) {
+// Returns argument indices corresponding to the resource variable inputs of
+// kernel context `ctx`.
+static std::vector<int> GetResourceVariableIndices(OpKernelContext* ctx) {
+  std::vector<int> out;
+  for (int64 i = 0; i < ctx->num_inputs(); i++) {
     if (ctx->input(i).dtype() == DT_RESOURCE) {
-      core::RefCountPtr<Var> variable;
-      ResourceHandle handle = HandleFromInput(ctx, i);
-      OptionalTensor& optional = variables[i];
-      optional.name = handle.name();
-      if (LookupResource(ctx, handle, &variable).ok()) {
-        tf_shared_lock lock(*variable->mu());
-        optional.present = true;
-        optional.value = *variable->tensor();
-      }
+      out.push_back(i);
     }
   }
-  return variables;
+  return out;
 }
-}  // namespace
 
 Status XlaCompileOnDemandOp::Run(OpKernelContext* ctx,
                                  const XlaDevice::Metadata& metadata,
                                  const XlaCompiler::CompilationResult* result,
-                                 xla::LocalExecutable* executable) {
-  std::map<int, OptionalTensor> variables = GetVariables(ctx);
-
+                                 xla::LocalExecutable* executable,
+                                 const ResourceVarsSnapshot& variable_args) {
   xla::LocalClient* client = metadata.client();
 
   // Builds an XLA allocator for the device.
@@ -62,7 +53,7 @@ Status XlaCompileOnDemandOp::Run(OpKernelContext* ctx,
       /*allocate_xla_tensors=*/true,
       /*use_multiple_streams=*/metadata.UseMultipleStreams());
 
-  launch_context.PopulateInputs(ctx, result, variables,
+  launch_context.PopulateInputs(ctx, result, variable_args,
                                 /*missing_ctx_input_prefix=*/0);
 
   se::Stream* stream =
@@ -83,9 +74,11 @@ Status XlaCompileOnDemandOp::Run(OpKernelContext* ctx,
       executable->Run(launch_context.arguments(), run_options);
   TF_RETURN_IF_ERROR(run_result.status());
 
+  const xla::HloInputOutputAliasConfig& input_output_alias =
+      executable->executable()->module().input_output_alias_config();
   TF_RETURN_IF_ERROR(launch_context.PopulateOutputs(
       ctx, result, run_result.ConsumeValueOrDie(),
-      /*missing_ctx_input_prefix=*/0));
+      /*missing_ctx_input_prefix=*/0, input_output_alias, variable_args));
   return Status::OK();
 }
 
@@ -113,7 +106,7 @@ Status XlaCompileOnDemandOp::ShouldArgumentBeConstant(
 Status XlaCompileOnDemandOp::Compile(
     OpKernelContext* ctx, const XlaDevice::Metadata& metadata,
     const XlaCompiler::CompilationResult** result,
-    xla::LocalExecutable** executable) {
+    ResourceVarsSnapshot* variable_args, xla::LocalExecutable** executable) {
   std::map<int, Tensor> constant_arguments;
   for (int64 i = 0; i < ctx->num_inputs(); ++i) {
     const Tensor& device_tensor = ctx->input(i);
@@ -143,16 +136,9 @@ Status XlaCompileOnDemandOp::Compile(
         attrs.set_on_host(true);
         TF_RETURN_IF_ERROR(ctx->allocate_temp(
             device_tensor.dtype(), device_tensor.shape(), &host_tensor, attrs));
-        Notification n;
-        Status status;
-        ctx->op_device_context()->CopyDeviceTensorToCPU(
+        Status status = ctx->op_device_context()->CopyDeviceTensorToCPUSync(
             &device_tensor, "ConstantArgument",
-            reinterpret_cast<Device*>(ctx->device()), &host_tensor,
-            [&](Status s) {
-              status = s;
-              n.Notify();
-            });
-        n.WaitForNotification();
+            reinterpret_cast<Device*>(ctx->device()), &host_tensor);
         if (!status.ok()) {
           LOG(ERROR) << "Copying tensor of shape "
                      << device_tensor.shape().DebugString() << " from "
@@ -191,20 +177,22 @@ Status XlaCompileOnDemandOp::Compile(
 
   XlaCompiler::CompileOptions compile_options;
   compile_options.is_entry_computation = true;
-  // Optimization: don't resolve constants. If we resolve constants we never
-  // emit them on the device, meaning that if they are needed by a following
-  // computation the host has to transfer them.
-  compile_options.resolve_compile_time_constants = false;
   // Optimization: where possible, have the computation return a naked array
   // rather than a one-element tuple.
   compile_options.always_return_tuple = false;
 
-  std::map<int, OptionalTensor> variable_args = GetVariables(ctx);
-
+  std::vector<int> variables_indices = GetResourceVariableIndices(ctx);
   std::vector<XlaCompiler::Argument> args;
-
-  TF_RETURN_IF_ERROR(XlaComputationLaunchContext::BuildXlaCompilerArguments(
-      constant_arguments, variable_args, ctx, &args));
+  {
+    std::vector<VariableInfo> variable_infos;
+    TF_RETURN_IF_ERROR(
+        GetVariableInfosFromCtxInputs(ctx, variables_indices, &variable_infos));
+    TF_RETURN_IF_ERROR(LockVariables(absl::MakeSpan(variable_infos)));
+    TF_RETURN_IF_ERROR(SnapshotResourceVariables(
+        ctx, variables_indices, variable_infos, variable_args));
+    TF_RETURN_IF_ERROR(XlaComputationLaunchContext::BuildXlaCompilerArguments(
+        constant_arguments, variable_infos, ctx, &args));
+  }
 
   return cache->CompileSingleOp(options, args, ctx, compile_options, result,
                                 executable);
@@ -215,8 +203,10 @@ void XlaCompileOnDemandOp::Compute(OpKernelContext* ctx) {
   xla::LocalExecutable* executable;
   const XlaDevice::Metadata* metadata;
   OP_REQUIRES_OK(ctx, XlaDevice::GetMetadata(ctx, &metadata));
-  OP_REQUIRES_OK(ctx, Compile(ctx, *metadata, &result, &executable));
-  OP_REQUIRES_OK(ctx, Run(ctx, *metadata, result, executable));
+  ResourceVarsSnapshot variable_args;
+  OP_REQUIRES_OK(ctx,
+                 Compile(ctx, *metadata, &result, &variable_args, &executable));
+  OP_REQUIRES_OK(ctx, Run(ctx, *metadata, result, executable, variable_args));
 }
 
 }  // namespace tensorflow

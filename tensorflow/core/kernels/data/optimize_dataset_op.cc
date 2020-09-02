@@ -18,7 +18,7 @@ limitations under the License.
 
 #include "tensorflow/core/framework/partial_tensor_shape.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/kernels/data/dataset_utils.h"
+#include "tensorflow/core/kernels/data/rewrite_utils.h"
 #include "tensorflow/core/lib/random/random.h"
 #include "tensorflow/core/protobuf/rewriter_config.pb.h"
 
@@ -55,9 +55,18 @@ void OptimizeDatasetOp::MakeDataset(OpKernelContext* ctx, DatasetBase* input,
   auto config_factory = [this, &optimizations]() {
     return CreateConfig(optimizations, optimization_configs_);
   };
-  OP_REQUIRES_OK(ctx,
-                 RewriteDataset(ctx, input, std::move(config_factory),
-                                /*optimize_function_library=*/true, output));
+  Status s = RewriteDataset(ctx, input, std::move(config_factory),
+                            /*record_fingerprint=*/true, output);
+  if (errors::IsDeadlineExceeded(s)) {
+    // Ignore DeadlineExceeded as it implies that the attempted rewrite took too
+    // long which should not prevent further computation.
+    LOG(WARNING) << s.ToString();
+
+    *output = input;
+    input->Ref();
+    return;
+  }
+  OP_REQUIRES_OK(ctx, s);
 }
 
 RewriterConfig OptimizeDatasetOp::CreateConfig(

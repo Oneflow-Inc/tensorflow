@@ -700,6 +700,38 @@ class HloEvaluatorTypedVisitor : public DfsHloVisitorWithDefault {
     return Status::OK();
   }
 
+  template <
+      typename NativeT,
+      typename std::enable_if<is_complex_t<NativeT>::value>::type* = nullptr>
+  Status HandleCbrt(HloInstruction* cbrt) {
+    TF_ASSIGN_OR_RETURN(
+        parent_->evaluated_[cbrt],
+        ElementWiseUnaryOp(cbrt, [](ElementwiseT elem_operand) -> ElementwiseT {
+          return std::pow(elem_operand, static_cast<ElementwiseT>(1.0 / 3.0));
+          return elem_operand.real() < 0
+                     ? -std::pow(-elem_operand,
+                                 static_cast<ElementwiseT>(1.0 / 3.0))
+                     : std::pow(elem_operand,
+                                static_cast<ElementwiseT>(1.0 / 3.0));
+        }));
+    return Status::OK();
+  }
+
+  template <
+      typename NativeT,
+      typename std::enable_if<!is_complex_t<NativeT>::value>::type* = nullptr>
+  Status HandleCbrt(HloInstruction* cbrt) {
+    TF_ASSIGN_OR_RETURN(parent_->evaluated_[cbrt],
+                        ElementWiseUnaryOp(cbrt, [](ElementwiseT elem_operand) {
+                          return std::cbrt(elem_operand);
+                        }));
+    return Status::OK();
+  }
+
+  Status HandleCbrt(HloInstruction* cbrt) override {
+    return HandleCbrt<ElementwiseT>(cbrt);
+  }
+
   Status HandleRsqrt(HloInstruction* rsqrt) override {
     TF_ASSIGN_OR_RETURN(
         parent_->evaluated_[rsqrt],
@@ -1389,9 +1421,10 @@ class HloEvaluatorTypedVisitor : public DfsHloVisitorWithDefault {
               *(accumulate_index_locations[i].second) = accumulate_index[i];
             }
 
+            ElementwiseT lhs_val(lhs_literal.Get<ReturnT>(lhs_index));
+            ElementwiseT rhs_val(rhs_literal.Get<ReturnT>(rhs_index));
             result_val +=
-                static_cast<ElementwiseT>(lhs_literal.Get<ReturnT>(lhs_index)) *
-                static_cast<ElementwiseT>(rhs_literal.Get<ReturnT>(rhs_index));
+                ToArithmeticSafeType(lhs_val) * ToArithmeticSafeType(rhs_val);
 
             // If there are no contracting dimension accumulate_index_sizes is
             // empty, do not try to count down from -1 to 0 since it is and
@@ -1677,6 +1710,10 @@ class HloEvaluatorTypedVisitor : public DfsHloVisitorWithDefault {
       case F16: {
         TF_ASSIGN_OR_RETURN(parent_->evaluated_[map],
                             MapImpl<Eigen::half>(map));
+        break;
+      }
+      case BF16: {
+        TF_ASSIGN_OR_RETURN(parent_->evaluated_[map], MapImpl<bfloat16>(map));
         break;
       }
       case F32: {

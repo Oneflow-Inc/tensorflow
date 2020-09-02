@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_DELEGATES_GPU_CL_TENSOR_H_
 #define TENSORFLOW_LITE_DELEGATES_GPU_CL_TENSOR_H_
 
+#include <cstdint>
 #include <memory>
 
 #include "absl/types/span.h"
@@ -23,6 +24,7 @@ limitations under the License.
 #include "tensorflow/lite/delegates/gpu/cl/cl_context.h"
 #include "tensorflow/lite/delegates/gpu/cl/cl_device.h"
 #include "tensorflow/lite/delegates/gpu/cl/cl_memory.h"
+#include "tensorflow/lite/delegates/gpu/cl/gpu_object.h"
 #include "tensorflow/lite/delegates/gpu/cl/tensor_type.h"
 #include "tensorflow/lite/delegates/gpu/cl/util.h"
 #include "tensorflow/lite/delegates/gpu/common/data_type.h"
@@ -35,11 +37,18 @@ namespace tflite {
 namespace gpu {
 namespace cl {
 
-class Tensor {
+class Tensor : public GPUObject {
  public:
-  Tensor() : memory_(nullptr) {}
-  Tensor(cl_mem memory, int width, int height, int channels, DataType data_type,
-         TensorStorageType storage_type);
+  Tensor()
+      : memory_(nullptr), image_buffer_memory_(nullptr), memory_owner_(true) {}
+  Tensor(cl_mem memory, bool memory_owner, const BHWC& shape,
+         const TensorDescriptor& descriptor);
+  Tensor(cl_mem memory, bool memory_owner, const BHWDC& shape,
+         const TensorDescriptor& descriptor);
+  Tensor(cl_mem memory, bool memory_owner, cl_mem image_buffer_memory,
+         const BHWC& shape, const TensorDescriptor& descriptor);
+  Tensor(cl_mem memory, bool memory_owner, cl_mem image_buffer_memory,
+         const BHWDC& shape, const TensorDescriptor& descriptor);
 
   // Move only
   Tensor(Tensor&& tensor);
@@ -49,44 +58,88 @@ class Tensor {
 
   virtual ~Tensor() { Release(); }
 
-  int Width() const { return width_; }
-  int Height() const { return height_; }
-  int Channels() const { return channels_; }
-  enum DataType DataType() const { return data_type_; }
-  TensorStorageType StorageType() const { return storage_type_; }
+  GPUResourcesWithValue GetGPUResources(AccessType access_type) const override;
 
-  int Depth() const { return IntegralDivideRoundUp(channels_, 4); }
-  int4 GetSizeWithDepth() const {
-    return int4(width_, height_, channels_,
-                IntegralDivideRoundUp(channels_, 4));
+  int Width() const { return shape_.w; }
+  int Height() const { return shape_.h; }
+  int Depth() const { return shape_.d; }
+  int Channels() const { return shape_.c; }
+  int Slices() const { return DivideRoundUp(shape_.c, 4); }
+  int Batch() const { return shape_.b; }
+
+  // returns int4(width * batch, height, slices, batch)
+  int4 GetWBatchedHSB() const {
+    return int4(shape_.w * shape_.b, shape_.h, Slices(), shape_.b);
   }
-  cl_mem GetMemoryPtr() const { return memory_; }
+  int4 GetWBatchedHDS() const {
+    return int4(shape_.w * shape_.b, shape_.h, shape_.d, Slices());
+  }
 
-  Status WriteDataBHWC(absl::Span<const float> in, CLCommandQueue* queue);
+  int4 GetWHSB() const { return int4(shape_.w, shape_.h, Slices(), shape_.b); }
+  int4 GetWHDS() const { return int4(shape_.w, shape_.h, shape_.d, Slices()); }
 
-  Status ReadDataBHWC(absl::Span<float> out, CLCommandQueue* queue) const;
+  TensorDescriptor GetDescriptor() const { return descriptor_; }
+  DataType GetDataType() const { return descriptor_.data_type; }
+  TensorStorageType GetStorageType() const { return descriptor_.storage_type; }
 
-  Status WriteData(CLCommandQueue* queue, const TensorFloat32& src);
-  Status ReadData(CLCommandQueue* queue, TensorFloat32* dst) const;
+  // for profiling and memory statistics
+  uint64_t GetMemorySizeInBytes() const;
 
- protected:
-  Status IsValid(const BHWC& shape) const;
+  cl_mem GetMemoryPtr() const;
+
+  // This function returns buffer memory ptr for IMAGE_BUFFER instead of image
+  // memory ptr.
+  cl_mem GetMemoryPtrForWriting() const;
+
+  absl::Status WriteData(CLCommandQueue* queue, const TensorFloat32& src);
+  absl::Status WriteData(
+      CLCommandQueue* queue,
+      const tflite::gpu::Tensor<Linear, DataType::FLOAT32>& src);
+  absl::Status WriteData(
+      CLCommandQueue* queue,
+      const tflite::gpu::Tensor<HWC, DataType::FLOAT32>& src);
+  absl::Status WriteData(CLCommandQueue* queue, const Tensor5DFloat32& src);
+  absl::Status ReadData(CLCommandQueue* queue, TensorFloat32* dst) const;
+  absl::Status ReadData(CLCommandQueue* queue, Tensor5DFloat32* dst) const;
+
+ private:
+  absl::Status IsValid(const BHWC& shape) const;
+  absl::Status IsValid(const BHWDC& shape) const;
+
+  int GetChannelsAlignment() const;
+  int GetAlignedChannels() const;
+
+  absl::Status WriteDataBHWDC(absl::Span<const float> in,
+                              CLCommandQueue* queue);
+  absl::Status ReadDataBHWDC(absl::Span<float> out,
+                             CLCommandQueue* queue) const;
 
   template <typename T>
-  void DataFromBHWC(absl::Span<const float> src, absl::Span<T> dst) const;
+  void DataFromBHWDC(absl::Span<const float> src, absl::Span<T> dst) const;
   template <typename T>
-  void DataToBHWC(absl::Span<const T> src, absl::Span<float> dst) const;
+  void DataToBHWDC(absl::Span<const T> src, absl::Span<float> dst) const;
 
   // TODO(sorokin) might be bad performance
-  int GetLinearIndex(int x, int y, int d, int sub_d) const {
-    switch (storage_type_) {
+  int GetLinearIndex(int b, int x, int y, int d, int s, int sub_c) const {
+    switch (descriptor_.storage_type) {
       case TensorStorageType::BUFFER:
+      case TensorStorageType::IMAGE_BUFFER:
       case TensorStorageType::TEXTURE_ARRAY:
-        return ((d * height_ + y) * width_ + x) * 4 + sub_d;  // DHWC4
+      case TensorStorageType::TEXTURE_3D:
+        return ((((d * Slices() + s) * shape_.h + y) * shape_.w + x) *
+                    shape_.b +
+                b) *
+                   4 +
+               sub_c;  // DSHWBC4
       case TensorStorageType::TEXTURE_2D:
-        return ((y * Depth() + d) * width_ + x) * 4 + sub_d;  // HDWC4
+        return ((((y * Slices() + s) * shape_.w + x) * shape_.b + b) *
+                    shape_.d +
+                d) *
+                   4 +
+               sub_c;  // HSWBDC4
       case TensorStorageType::SINGLE_TEXTURE_2D:
-        return (sub_d * height_ + y) * width_ + x;
+        return (((y * shape_.w + x) * shape_.b + b) * shape_.d + d) * shape_.c +
+               sub_c;  // HWBDC
       case TensorStorageType::UNKNOWN:
         return -1;
     }
@@ -96,74 +149,43 @@ class Tensor {
   void Release();
 
   cl_mem memory_;
-  int width_;
-  int height_;
-  int channels_;
-  enum DataType data_type_;
-  TensorStorageType storage_type_;
-};
-
-class TensorBHWC : public Tensor {
- public:
-  TensorBHWC() = default;
-  TensorBHWC(cl_mem memory, int width, int height, int channels,
-             enum DataType data_type, TensorStorageType storage_type)
-      : Tensor(memory, width, height, channels, data_type, storage_type) {}
-
-  // Move only
-  TensorBHWC(TensorBHWC&& tensor);
-  TensorBHWC& operator=(TensorBHWC&& tensor);
-  TensorBHWC(const TensorBHWC&) = delete;
-  TensorBHWC& operator=(const TensorBHWC&) = delete;
-
-  Status WriteData(CLCommandQueue* queue, void* data_ptr) const {
-    const size_t data_size =
-        Width() * Height() * Channels() * SizeOf(DataType());
-    RETURN_IF_ERROR(
-        queue->EnqueueWriteBuffer(GetMemoryPtr(), data_size, data_ptr));
-    return OkStatus();
-  }
-
-  Status ReadData(CLCommandQueue* queue, void* data_ptr) const {
-    const size_t data_size =
-        Width() * Height() * Channels() * SizeOf(DataType());
-    RETURN_IF_ERROR(
-        queue->EnqueueReadBuffer(GetMemoryPtr(), data_size, data_ptr));
-    return OkStatus();
-  }
-
-  ~TensorBHWC() override { ReleaseBHWC(); }
-
- private:
-  friend Status CreateTensorBHWCFromOpenGlObject(const CLContext& context,
-                                                 cl_int ssbo_id,
-                                                 const HWC& shape,
-                                                 bool is_readonly,
-                                                 TensorBHWC* tensor);
-
-  void ReleaseBHWC();
-
-  // When object created from GL object it isn't owner
-  bool owner_ = true;
+  cl_mem image_buffer_memory_;  // for TensorStorageType::IMAGE_BUFFER only
+  bool memory_owner_;
+  BHWDC shape_;
+  TensorDescriptor descriptor_;
 };
 
 using TensorPtr = std::shared_ptr<Tensor>;
 
-Status AllocateTensorMemory(const CLContext& context, const CLDevice& device,
-                            int width, int height, int channels,
-                            DataType data_type, TensorStorageType storage_type,
-                            CLMemory* result);
+absl::Status AllocateTensorMemory(const CLContext& context,
+                                  const CLDevice& device, const BHWC& shape,
+                                  const TensorDescriptor& descriptor,
+                                  CLMemory* result);
 
-Status CreateTensor(const CLContext& context, const CLDevice& device, int width,
-                    int height, int channels, DataType data_type,
-                    TensorStorageType storage_type, Tensor* result);
+absl::Status AllocateTensorMemory(const CLContext& context,
+                                  const CLDevice& device, const BHWDC& shape,
+                                  const TensorDescriptor& descriptor,
+                                  CLMemory* result);
 
-Status CreateTensorBHWC(const CLContext& context, const HWC& shape,
-                        DataType data_type, void* data, Tensor* result);
+absl::Status CreateTensor(const CLContext& context, const CLDevice& device,
+                          const BHWC& shape, const TensorDescriptor& descriptor,
+                          Tensor* result);
 
-Status CreateTensorBHWCFromOpenGlObject(const CLContext& context,
-                                        cl_int ssbo_id, const HWC& shape,
-                                        bool is_readonly, TensorBHWC* tensor);
+absl::Status CreateTensor(const CLContext& context, const CLDevice& device,
+                          const BHWDC& shape,
+                          const TensorDescriptor& descriptor, Tensor* result);
+
+absl::Status CreateSharedTensor(const CLContext& context,
+                                const CLDevice& device, cl_mem memory,
+                                const BHWC& shape,
+                                const TensorDescriptor& descriptor,
+                                Tensor* result);
+
+absl::Status CreateSharedTensor(const CLContext& context,
+                                const CLDevice& device, cl_mem memory,
+                                const BHWDC& shape,
+                                const TensorDescriptor& descriptor,
+                                Tensor* result);
 
 }  // namespace cl
 }  // namespace gpu

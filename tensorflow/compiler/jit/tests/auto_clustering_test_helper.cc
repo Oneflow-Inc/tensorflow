@@ -20,7 +20,7 @@ limitations under the License.
 #include "tensorflow/compiler/jit/xla_cluster_util.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/statusor.h"
-#include "tensorflow/core/graph/graph_constructor.h"
+#include "tensorflow/core/common_runtime/graph_constructor.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/io/random_inputstream.h"
 #include "tensorflow/core/lib/io/zlib_compression_options.h"
@@ -186,7 +186,7 @@ Status AutoClusteringTest::RunAutoClusteringTestWithGzippedPbtxt(
                          /*input_buffer_bytes=*/k_buffer_size,
                          /*output_buffer_bytes=*/k_buffer_size,
                          io::ZlibCompressionOptions::GZIP());
-  string decompressed_pbtxt_string;
+  tstring decompressed_pbtxt_string;
   Status s = in.ReadNBytes(INT_MAX, &decompressed_pbtxt_string);
   if (!s.ok() && !errors::IsOutOfRange(s)) {
     // OutOfRange is fine since we set the number of read bytes to INT_MAX.
