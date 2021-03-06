@@ -13,13 +13,13 @@
 # limitations under the License.
 
 
-def convert_url_to_oss_key1(url: str):
-    path = url[8::]
+def convert_url_to_oss_key1(url):
+    path = url[len("https://")::]
     url.split("/")
     return "/".join(["third_party_mirror", "https", path])
 
 
-def should_be_mirrored(url: str):
+def should_be_mirrored(url):
     return (
         url.endswith(("gz", "tar", "zip"))
         and not "mirror.tensorflow.org" in url
