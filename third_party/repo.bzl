@@ -12,30 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from urllib.parse import urlparse
-import os
 
-
-def convert_url_to_oss_key(url):
-    parsed = urlparse(url)
-    assert parsed.scheme == "https", url
-    assert not parsed.params
-    assert not parsed.query
-    assert not parsed.port
-    assert not parsed.fragment
-    assert parsed.path.startswith("/")
-    path = parsed.path[1::]
-    return os.path.join("third_party_mirror", parsed.scheme, parsed.netloc, path)
+def convert_url_to_oss_key1(url: str):
+    https = "https://"
+    assert url.startswith(https)
+    path = url[len(https) :]
+    return "/".join(["third_party_mirror", "https", path])
 
 
 def should_be_mirrored(url: str):
-    parsed = urlparse(url)
     return (
-        not parsed.port
-        and not parsed.query
-        and not parsed.params
-        and url.endswith(("gz", "tar", "zip"))
-        and url
+        url.endswith(("gz", "tar", "zip"))
         and not "mirror.tensorflow.org" in url
         and not "mirror.bazel.build" in url
         and not "aliyuncs.com" in url
@@ -44,7 +31,7 @@ def should_be_mirrored(url: str):
 
 def convert_url_to_oss_https_url(url):
     if should_be_mirrored(url):
-        key = convert_url_to_oss_key(url)
+        key = convert_url_to_oss_key1(url)
         prefix = "https://oneflow-static.oss-cn-beijing.aliyuncs.com/"
         return os.path.join(prefix, key)
     else:
