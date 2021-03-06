@@ -14,9 +14,7 @@
 
 
 def convert_url_to_oss_key1(url: str):
-    https = "https://"
-    assert url.startswith(https)
-    path = url[len(https) :]
+    path = url[len("https://") :]
     return "/".join(["third_party_mirror", "https", path])
 
 
