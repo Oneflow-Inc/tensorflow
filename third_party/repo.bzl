@@ -12,6 +12,44 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from urllib.parse import urlparse
+import os
+
+
+def convert_url_to_oss_key(url):
+    parsed = urlparse(url)
+    assert parsed.scheme == "https", url
+    assert not parsed.params
+    assert not parsed.query
+    assert not parsed.port
+    assert not parsed.fragment
+    assert parsed.path.startswith("/")
+    path = parsed.path[1::]
+    return os.path.join("third_party_mirror", parsed.scheme, parsed.netloc, path)
+
+
+def should_be_mirrored(url: str):
+    parsed = urlparse(url)
+    return (
+        not parsed.port
+        and not parsed.query
+        and not parsed.params
+        and url.endswith(("gz", "tar", "zip"))
+        and url
+        and not "mirror.tensorflow.org" in url
+        and not "mirror.bazel.build" in url
+        and not "aliyuncs.com" in url
+    )
+
+
+def convert_url_to_oss_https_url(url):
+    if should_be_mirrored(url):
+        key = convert_url_to_oss_key(url)
+        prefix = "https://oneflow-static.oss-cn-beijing.aliyuncs.com/"
+        return os.path.join(prefix, key)
+    else:
+        return url
+
 """Utilities for defining TensorFlow Bazel dependencies."""
 
 _SINGLE_URL_WHITELIST = depset([
@@ -186,7 +224,7 @@ def _third_party_http_archive(ctx):
 
     else:
         ctx.download_and_extract(
-            ctx.attr.urls,
+            [convert_url_to_oss_https_url(u) for u in ctx.attr.urls],
             "",
             ctx.attr.sha256,
             ctx.attr.type,
