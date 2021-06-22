@@ -1,4 +1,6 @@
+#if GOOGLE_CUDA
 #include "tensorflow/stream_executor/gpu/gpu_stream.h"
+#endif  // GOOGLE_CUDA
 #include "tensorflow/compiler/xla/shape_tree.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/service/hlo_value.h"
@@ -10,12 +12,14 @@
 
 namespace xla {
 
+#if GOOGLE_CUDA
 void SwapGpuStreamHandle(se::Stream *stream, void **gpu_stream) {
   void **cuda_stream = se::gpu::AsGpuStream(stream)->GpuStreamMemberHack();
   void *tmp_stream = *cuda_stream;
   *cuda_stream = *gpu_stream;
   *gpu_stream = tmp_stream;
 }
+#endif  // GOOGLE_CUDA
 
 inline size_t Align(int alignment, size_t size) {
   return (size + alignment - 1) / alignment * alignment;
