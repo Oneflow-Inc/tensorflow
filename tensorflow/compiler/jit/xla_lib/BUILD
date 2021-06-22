@@ -22,6 +22,7 @@ cc_library(
         "xla_runtime_util.cc",
         "xla_runtime_util.h",
     ],
+    copts = if_cuda(["-DGOOGLE_CUDA=1"]),
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/stream_executor:stream",
