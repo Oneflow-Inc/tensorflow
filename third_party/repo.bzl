@@ -12,6 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+def convert_url_to_oss_key1(url):
+    path = url[len("https://")::]
+    return "/".join(["third_party_mirror", "https", path])
+
+
+def should_be_mirrored(url):
+    return (
+        url.endswith(("gz", "tar", "zip"))
+        and not "mirror.tensorflow.org" in url
+        and not "mirror.bazel.build" in url
+        and not "aliyuncs.com" in url
+    )
+
+
+def convert_url_to_oss_https_url(url):
+    if should_be_mirrored(url):
+        key = convert_url_to_oss_key1(url)
+        return "https://oneflow-static.oss-cn-beijing.aliyuncs.com/" + key
+    else:
+        return url
+
 """Utilities for defining TensorFlow Bazel dependencies."""
 
 _SINGLE_URL_WHITELIST = depset([
@@ -186,7 +208,7 @@ def _third_party_http_archive(ctx):
 
     else:
         ctx.download_and_extract(
-            ctx.attr.urls,
+            [convert_url_to_oss_https_url(u) for u in ctx.attr.urls],
             "",
             ctx.attr.sha256,
             ctx.attr.type,
