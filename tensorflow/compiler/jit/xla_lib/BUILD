@@ -1,5 +1,7 @@
 licenses(["notice"])  # Apache 2.0
 
+package(default_visibility = ["//tensorflow:internal"])
+
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_test",
@@ -32,17 +34,26 @@ cc_library(
     ],
 )
 
+exports_files(
+    [
+        "version_script.lds",
+    ],
+)
+
 tf_cc_shared_object(
     name = "libxla_core.so",
     linkopts = select({
         "//tensorflow:windows": [],
         "//conditions:default": [
             "-z muldefs",
+            "-Wl,--version-script",
+            "$(location //tensorflow/compiler/jit/xla_lib:version_script.lds)",
         ],
     }),
     visibility = ["//visibility:public"],
     deps = [
         ":xla_runtime_util",
+        "//tensorflow/compiler/jit/xla_lib:version_script.lds",
         "//tensorflow/compiler/jit:xla_tensor",
         "//tensorflow/compiler/xla/client",
         "//tensorflow/compiler/xla/client:xla_builder",
