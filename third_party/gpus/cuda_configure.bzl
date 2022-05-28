@@ -595,7 +595,7 @@ def _find_libs(repository_ctx, check_cuda_libs_script, cuda_config):
     }
 
     # Verify that the libs actually exist at their locations.
-    _check_cuda_libs(repository_ctx, check_cuda_libs_script, check_cuda_libs_params.values())
+    # _check_cuda_libs(repository_ctx, check_cuda_libs_script, check_cuda_libs_params.values())
 
     paths = {filename: v[0] for (filename, v) in check_cuda_libs_params.items()}
     return paths
